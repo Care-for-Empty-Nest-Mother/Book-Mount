@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# 打包产物
+build/
+dist/
+*.zip
+
+# 测试目录与临时产物（本地保留，不入公开仓库）
+tests/
+
+# 用户方案不入库（隐私）——示例方案保留
+profiles/*
+!profiles/学位论文示例.fprof.json
