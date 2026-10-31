@@ -15,6 +15,7 @@ from docx.shared import Cm
 
 from .styles_xml import build_style_element, update_doc_defaults, find_style_by_id_or_name
 from .numbering_xml import existing_ids, build_numbering, num_ref_for_styles
+from .page_furniture import apply_headers_footers
 
 PAPER_SIZE_CM = {
     "A4": (21.0, 29.7),
@@ -162,5 +163,12 @@ def render_dotx(profile: dict, out_path) -> Path:
     doc = Document()          # python-docx 默认模板为底座
     report = render_styles_into(doc, profile, remove_other_paragraph_styles=True)
     apply_page_setup(doc, profile.get("page") or {})
+    # M2：模板也带页眉页脚（单节模板，无正文起编映射 → 页码从第 1 页起编）
+    hf_cfg = profile.get("header_footer")
+    if isinstance(hf_cfg, dict) and hf_cfg:
+        try:
+            apply_headers_footers(doc, hf_cfg, body_section_idx=0)
+        except Exception:
+            pass              # 模板页眉页脚失败不阻断渲染
     save_as_dotx(doc, out_path)
     return Path(out_path)

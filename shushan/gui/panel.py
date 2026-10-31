@@ -319,6 +319,18 @@ class ShushanPanel(QMainWindow):
         if report.get("uncited_entries"):
             nums = "、".join(f"[{n}]" for n in report["uncited_entries"][:8])
             self.log_line(f"        ⚠ {len(report['uncited_entries'])} 条文献未被正文引用：{nums}")
+        hf_rep = report.get("header_footer") or {}
+        if hf_rep.get("applied"):
+            self.log_line(f"        页眉页脚：已写入 {hf_rep.get('sections', 0)} 节"
+                          f"（header_footer）")
+        toc_rep = report.get("toc") or {}
+        if toc_rep.get("inserted"):
+            self.log_line("        目录域已插入（Word 中右键 → 更新域 生成条目）")
+        elif toc_rep.get("reason"):
+            self.log_line(f"        目录域：{toc_rep['reason']}")
+        if report.get("table_cells"):
+            self.log_line(f"        表格单元格重排：{report['table_cells']} 段"
+                          f"（tables.cell_style）")
         for w in report.get("warnings", [])[:10]:
             self.log_line(f"        ⚠ {w}")
         QMessageBox.information(self, APP_TITLE, msg + "\n\n原文件已备份，可用 Word 打开查看效果。")

@@ -10,7 +10,7 @@ from docx.oxml.ns import qn
 from .effective import (StylesDB, theme_fonts, effective_para_format,
                         format_signature, read_page_setup,
                         paragraph_has_object, object_kind, figure_extents_cm,
-                        parse_citations, RE_LIT_NUM)
+                        parse_citations, RE_LIT_NUM, parse_ppr)
 
 
 @dataclass
@@ -40,6 +40,8 @@ class AnalysisResult:
     citation_positions: dict = field(default_factory=dict)  # {文献序号: [引用段落号]}
     dangling_citations: list = field(default_factory=list)  # 悬空引用（无对应条目）
     uncited_entries: list = field(default_factory=list)     # 未被引用的文献序号
+    header_footer: dict = field(default_factory=dict)     # 页眉页脚配置（M2 提取）
+    table_cell_style: dict = field(default_factory=dict)  # 表格单元格文字样式多数派（M2）
 
     def nonempty(self):
         """可归类段落：有文字，或承载图片/公式（对象段也有版式可提取）。"""
@@ -80,6 +82,187 @@ def _count_citations(paragraphs) -> int:
                if p.fmt is not None and p.suggestion not in ("reference", "ignore"))
 
 
+# ---- M2：页眉页脚 与 表格单元格样式 提取 ----
+
+def _field_token(instr: str) -> str | None:
+    """域代码 → {page}/{pages} 记号（其余域不识别）。"""
+    s = (instr or "").upper()
+    if "NUMPAGES" in s:
+        return "{pages}"
+    if "PAGE" in s:
+        return "{page}"
+    return None
+
+
+def _story_paragraph_template(p_el) -> str:
+    """把页脚段落里的文字与 PAGE/NUMPAGES 域还原成模板串。
+
+    复杂域（fldChar begin…separate…缓存结果…end）只取 instrText 记号、
+    跳过缓存结果文字；fldSimple 直接按 instr 映射。"""
+    parts = []
+    state = {"in_result": False}
+
+    def walk(el):
+        for child in el:
+            tag = child.tag
+            if tag == qn("w:fldSimple"):
+                tok = _field_token(child.get(qn("w:instr")) or "")
+                if tok:
+                    parts.append(tok)
+            elif tag == qn("w:r"):
+                fld = child.find(qn("w:fldChar"))
+                if fld is not None:
+                    ftype = fld.get(qn("w:fldCharType"))
+                    if ftype == "separate":
+                        state["in_result"] = True
+                    elif ftype == "end":
+                        state["in_result"] = False
+                    continue
+                instr = child.find(qn("w:instrText"))
+                if instr is not None and (instr.text or "").strip():
+                    tok = _field_token(instr.text)
+                    if tok:
+                        parts.append(tok)
+                    continue
+                if not state["in_result"]:
+                    for t_el in child.findall(qn("w:t")):
+                        parts.append(t_el.text or "")
+            elif tag in (qn("w:hyperlink"), qn("w:smartTag")):
+                walk(child)
+
+    walk(p_el)
+    return "".join(parts)
+
+
+def _extract_header_footer(doc, sdb: StylesDB) -> dict:
+    """读参考文档页眉页脚 → 方案 header_footer 键（§5.5）。
+
+    内容取第一个有内容的节（封面节常为空，取正文节才有意义）；
+    PAGE/NUMPAGES 域还原为 {page}/{pages} 模板；首页不同/奇偶不同读
+    sectPr 与文档级标志。参考文档没有任何页眉页脚时返回 {}。
+    """
+    try:
+        sections = list(doc.sections)
+    except Exception:
+        return {}
+    if not sections:
+        return {}
+    header_cfg = None
+    footer_cfg = None
+    for sec in sections:
+        if header_cfg is None:
+            try:
+                if not sec.header.is_linked_to_previous:
+                    paras = [p for p in sec.header.paragraphs if p.text.strip()]
+                    if paras:
+                        p0 = paras[0]
+                        align = parse_ppr(p0._p).get("align") or "center"
+                        fmt = effective_para_format(p0, sdb)
+                        font = {k: fmt[k] for k in ("font_cn", "font_en", "size_pt")
+                                if fmt.get(k)}
+                        header_cfg = {
+                            "enabled": True,
+                            "content": "\n".join(p.text.strip() for p in paras),
+                            "align": align,
+                        }
+                        if font:
+                            header_cfg["font"] = font
+            except Exception:
+                header_cfg = None
+        if footer_cfg is None:
+            try:
+                if not sec.footer.is_linked_to_previous:
+                    best = None
+                    for p in sec.footer.paragraphs:
+                        tpl = _story_paragraph_template(p._p)
+                        if not tpl.strip():
+                            continue
+                        has_field = "{page}" in tpl or "{pages}" in tpl
+                        pos = parse_ppr(p._p).get("align") or "center"
+                        if has_field:
+                            best = (pos, tpl)
+                            break
+                        if best is None:
+                            best = (pos, tpl)
+                    if best:
+                        footer_cfg = {"enabled": True, "page_number": {
+                            "position": best[0], "format": best[1], "start_at": 1}}
+            except Exception:
+                footer_cfg = None
+        if header_cfg is not None and footer_cfg is not None:
+            break
+    if header_cfg is None and footer_cfg is None:
+        return {}
+    diff_first = False
+    try:
+        diff_first = any(s.different_first_page_header_footer for s in sections)
+    except Exception:
+        pass
+    diff_oe = False
+    try:
+        diff_oe = bool(doc.settings.odd_and_even_pages_header_footer)
+    except Exception:
+        pass
+    header_cfg = header_cfg or {"enabled": False}
+    if diff_first:
+        header_cfg["different_first"] = True
+    if diff_oe:
+        header_cfg["different_odd_even"] = True
+    return {"header": header_cfg,
+            "footer": footer_cfg or {"enabled": False},
+            "body_starts_new_section": False}
+
+
+def _extract_table_cell_style(doc, sdb: StylesDB) -> dict:
+    """表格单元格段落格式多数派 → tables.cell_style（§5.3/§5.5）。
+
+    统计全部非空单元格段落的字体/字号/对齐，取严格多数派
+    （>50%，平票不写），避免把噪声写成方案。"""
+    from collections import Counter
+    votes = {"font_cn": Counter(), "font_en": Counter(),
+             "size_pt": Counter(), "align": Counter()}
+    total = 0
+    try:
+        tables = doc.tables
+    except Exception:
+        return {}
+    for tbl in tables:
+        # 合并单元格去重：持有元素强引用按身份比较（id() 会因 lxml 代理
+        # 地址复用产生误判，见 page_furniture.restyle_table_cells 注释）
+        seen_els: list = []
+        for row in tbl.rows:
+            for cell in row.cells:
+                tc_el = cell._tc
+                if any(tc_el is e for e in seen_els):
+                    continue
+                seen_els.append(tc_el)
+                for para in cell.paragraphs:
+                    if not para.text.strip():
+                        continue
+                    try:
+                        fmt = effective_para_format(para, sdb)
+                    except Exception:
+                        continue
+                    for k in ("font_cn", "font_en"):
+                        if fmt.get(k):
+                            votes[k][fmt[k]] += 1
+                    if fmt.get("size_pt"):
+                        votes["size_pt"][fmt["size_pt"]] += 1
+                    if fmt.get("align"):
+                        votes["align"][fmt["align"]] += 1
+                    total += 1
+    if not total:
+        return {}
+    out = {}
+    for k, cnt in votes.items():
+        if not cnt:
+            continue
+        v, c = cnt.most_common(1)[0]
+        if c * 2 > sum(cnt.values()):         # 严格多数派
+            out["alignment" if k == "align" else k] = v
+    return out
+
+
 def analyze_document(path) -> AnalysisResult:
     path = Path(path)
     doc = docx.Document(str(path))
@@ -115,6 +298,15 @@ def analyze_document(path) -> AnalysisResult:
                                           citations=cits))
     result.table_settings = _extract_table_settings(doc)
     result.citation_count = _count_citations(result.nonempty())
+    # M2：页眉页脚配置 与 表格单元格文字样式多数派
+    try:
+        result.header_footer = _extract_header_footer(doc, sdb)
+    except Exception:
+        result.header_footer = {}
+    try:
+        result.table_cell_style = _extract_table_cell_style(doc, sdb)
+    except Exception:
+        result.table_cell_style = {}
 
     # ---- 引用与文献的对应关系、完整性检查 ----
     seq = 0

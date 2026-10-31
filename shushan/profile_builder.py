@@ -180,6 +180,15 @@ def build_profile(analysis, assignment: dict, name: str, source: str = "docx",
     # 表格跨页规范（从参考文档多数派提取；无表格时用规范默认值）
     profile["tables"] = dict(analysis.table_settings) if analysis.table_settings else \
         {"repeat_header": True, "cant_split_rows": True}
+    # 表格单元格文字样式（参考文档表格多数派；无表格时缺省不写）
+    cell_style = getattr(analysis, "table_cell_style", None)
+    if isinstance(cell_style, dict) and cell_style:
+        profile["tables"]["cell_style"] = cell_style
+
+    # 页眉页脚（仅当参考文档确有内容时写入，§5.5）
+    hf = getattr(analysis, "header_footer", None)
+    if isinstance(hf, dict) and hf:
+        profile["header_footer"] = hf
 
     # 图片尺寸参考统计（信息性：应用时不盲目改图宽，仅做超版心安全缩放）
     sizes = analysis.figure_sizes_cm

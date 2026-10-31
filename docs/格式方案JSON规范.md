@@ -18,9 +18,9 @@
   "page":    { ... },           // 可选：页面设置
   "styles":  { ... },           // 必填：各内容类型的格式定义
   "numbering": { ... },         // 可选：标题多级编号
-  "header_footer": { ... },     // 可选（M2 生效）：页眉页脚页码
-  "toc":     { ... },           // 可选（M2 生效）：目录样式
-  "caption": { ... },           // 可选（M2 生效）：图表题注规则
+  "header_footer": { ... },     // 可选：页眉页脚页码（M2 已生效）
+  "toc":     { ... },           // 可选：目录域（M2 已生效）
+  "caption": { ... },           // 可选（M3 生效）：图表题注规则
   "skeleton": [ ... ],          // 可选（M3 生效）：新文档骨架
   "mapping": { ... }            // 可选：原文献样式名/特征 → 内容类型，供精确复用
 }
@@ -131,16 +131,21 @@ quote note                                       引用段落/注释
 标记不处理。同时程序会检查引用完整性（悬空引用 / 未被引用的文献）并在
 批注视图与整稿日志中提示。
 
-## 5.5 tables（可选）—— 跨页表格规范
+## 5.5 tables（可选）—— 跨页表格规范与单元格文字样式
 
 ```jsonc
-"tables": { "repeat_header": true, "cant_split_rows": true }
+"tables": { "repeat_header": true, "cant_split_rows": true,
+            "cell_style": { "font_cn": "宋体", "font_en": "Times New Roman",
+                            "size_pt": 10.5, "alignment": "center" } }
 ```
 
 - `repeat_header`：跨页表格的标题行在每一页重复（Word 原生 tblHeader）；
 - `cant_split_rows`：表格行不跨页拆分（cantSplit），避免一行内容被拦腰截断；
 - 程序会从参考文档的表格多数派自动提取这两个值；无表格时默认均为 true。
 - 整稿时应用到目标文档的全部表格。
+- `cell_style`（M2）：表格内部文字重排——把全部单元格的文字统一为该字体、
+  字号与对齐（直接格式落地，不改文字内容、不动表格结构）；提取时自动学习
+  参考文档表格单元格的多数派格式。可省略（省略时表格文字不动）。
 
 ## 6. header_footer（可选，M2 生效）
 
@@ -158,14 +163,32 @@ quote note                                       引用段落/注释
 
 `format` 中的 `{page}` `{pages}` 会替换为 Word 的 PAGE / NUMPAGES 域。
 
-## 7. toc / caption（可选，M2 生效）
+整稿行为（M2）：
+
+- 多节文档按节处理：`body_starts_new_section=true` 时，页码重启写入**第一个
+  正文级标题所在节**，该节之前各节（封面/摘要）页眉页脚清空并断开继承；
+- `different_first`：只在页眉页脚区的第一节设首页不同（首页页眉页脚留空），
+  多节文档不会让每一章的首页都丢页眉页脚；
+- `different_odd_even`：仅打开 Word 的奇偶页开关，奇偶内容相同（同内容镜像
+  写入偶数页），差异化内容由用户在 Word 里自行编辑；
+- 从参考文档提取时：页眉取第一个有内容的节，页脚里的 PAGE/NUMPAGES 域还原
+  为 `{page}`/`{pages}` 模板；参考文档没有页眉页脚时不写入方案；
+- Word 打开整稿后的文档会自动刷新域（updateFields），页码即显示实际值。
+
+## 7. toc / caption（可选，M2 已生效）
 
 ```jsonc
-"toc":     { "levels": 3, "leader": "dot", "page_number_align": "right" },
+"toc":     { "levels": 3, "leader": "dot", "page_number_align": "right", "insert": true },
 "caption": { "figure_pattern": "图{chap}-{seq}", "table_pattern": "表{chap}-{seq}",
              "position_figure": "below", "position_table": "above",
              "detect_patterns": ["^图\\s*\\d", "^表\\s*\\d", "^Fig", "^Table\\s*\\d"] }
 ```
+
+`toc` 的整稿行为（M2）：`insert=true` 且文档内**尚无 TOC 域**时，在第一个
+标题段之前插入 TOC 域（`\o "1-{levels}" \h \z \u`），生成的条目自动套用
+方案的 toc_1~3 样式；文档已有 TOC 域则不重复插入。无论插入与否都会在
+settings.xml 写 `updateFields`，Word 打开文档时自动刷新全部域。在 Word 中
+右键目录处 →「更新域」即可生成/刷新目录条目。
 
 `detect_patterns` 是正则表达式数组，用于归类时识别图注/表注段落，按需增删
 （英文期刊可加 `"^Figure\\s*\\d"` 等）。

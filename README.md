@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)](#)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#)
-[![Release](https://img.shields.io/badge/release-v0.1.0-green)](#)
+[![Release](https://img.shields.io/badge/release-v0.2.0-green)](#)
 
 </div>
 
@@ -37,6 +37,15 @@
 - **整稿安全机制**：任何写操作前自动备份到 `书山备份/`；图片、公式段防裁剪保护
   （固定值行距自动豁免）；超版心图片等比安全缩放；跨页表格规范
   （标题行重复 + 行不拆分）；表格与公式内容零改动。
+- **页眉页脚与页码（M2）**：按方案给各节写入页眉文字与页码域
+  （`第 {page} 页 共 {pages} 页`，Word 原生 PAGE/NUMPAGES 域），支持首页不同、
+  奇偶页开关、**正文起编**（封面/摘要节页眉页脚清空、页码从正文第一章重新计数）；
+  Word 打开时自动刷新域（updateFields）。
+- **目录域（M2）**：文档没有目录时在第一个标题前自动插入 TOC 域
+  （按方案目录级数），已有目录则不动；条目样式可由方案的 toc_1~3 定义。
+- **表格内部文字重排（M2）**：按方案 `tables.cell_style` 统一全部表格单元格的
+  字体、字号与对齐——不改文字、不动表格结构；提取时自动学习参考文档
+  表格的多数派单元格格式。
 - **格式方案文件**：提取结果沉淀为 `.fprof.json`——人可读、可手改、可分享，
   也支持让 AI 按规范生成后导入（内置校验器，错误定位到字段）。
 
@@ -103,7 +112,8 @@ pyinstaller --noconfirm --clean --name BookMount --windowed ^
 
 学位论文排版 / 期刊投稿格式调整 / 团队格式统一 / 把导师改好的版式复用到自己的稿子。
 
-> 已知边界：表格内部文字的逐格重排、PDF 文献提取、WPS 适配在计划中。
+> 已知边界：PDF 文献提取、WPS 适配、题注 SEQ 域（图表编号改写）与奇偶页
+> 差异化页眉内容在计划中；奇偶页开关 v0.2 已支持但奇偶内容相同（镜像写入）。
 > 文献条目文字本身的著录规范化不做自动改写。
 
 ## 📄 许可

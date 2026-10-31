@@ -20,6 +20,8 @@ from ..backup import backup_file
 from ..profile_builder import sig_str
 from ..types import IGNORE_TYPE, style_name_of
 from .dotx_renderer import render_styles_into, apply_page_setup
+from .page_furniture import (apply_headers_footers, apply_toc_updates,
+                             restyle_table_cells, paragraph_section_map)
 from .styles_xml import _spacing_xml, _indent_xml, _set_font
 
 # 段落直接格式里允许被清除的属性（其余如 sectPr 保留）
@@ -330,6 +332,33 @@ MODE_LABELS = {
     "custom": "自定义编号样式",
 }
 
+# 前置区类型（摘要/关键词等）：正文起编与目录插入点要跳过它们之前的标题段
+FRONT_MATTER_TYPES = ("abstract", "en_abstract", "keywords", "en_keywords")
+
+
+def find_body_heading_index(analysis, assignment: dict) -> int | None:
+    """定位"正文级标题"段落（M2：页眉页脚正文起编 与 目录域插入点共用）。
+
+    封面大标题常被自动建议为 heading_1，直接取第一个 heading 段会把封面
+    当成正文（页眉写入封面节、目录插到封面标题前）。优先取前置区
+    （摘要/关键词段与目录条目行）之后的第一个标题段；没有前置区标记时
+    回落为第一个标题段。无标题段返回 None。
+    """
+    headings = [p.index for p in analysis.nonempty()
+                if str(assignment.get(p.index, "")).startswith("heading_")]
+    if not headings:
+        return None
+    last_front = None
+    for p in analysis.nonempty():
+        t = assignment.get(p.index)
+        if t in FRONT_MATTER_TYPES or (t == IGNORE_TYPE and "目录条目" in (p.reason or "")):
+            last_front = p.index
+    if last_front is not None:
+        after = [h for h in headings if h > last_front]
+        if after:
+            return after[0]
+    return headings[0]
+
 
 def apply_format_override(paragraph, spec: dict):
     """把手动修改的格式以直接格式写到段落上（优先于样式）。
@@ -477,8 +506,38 @@ def apply_profile_offline(profile: dict, docx_path, para_override: dict | None =
             failed.append(f"段落{p.index}: 样式 {sname} 不存在")
         except Exception as e:                     # 单段失败不拖垮整稿
             failed.append(f"段落{p.index}: {e}")
+    # ---- M2：页眉页脚 / 目录域 / 表格单元格文字重排 ----
+    # 顺序：段落重排（上方循环）→ 页眉页脚 → 表格重排 →（收尾）目录域；
+    # 三者全部 try/except 包裹，失败记警告不阻断整稿。
+    sec_map = {}
+    try:
+        sec_map = paragraph_section_map(doc)
+    except Exception:
+        sec_map = {}
+    body_heading_idx = find_body_heading_index(analysis, assignment)
+    hf_cfg = profile.get("header_footer") if isinstance(profile.get("header_footer"), dict) else {}
+    hf_report = {"applied": False, "sections": 0, "warnings": []}
+    if hf_cfg:
+        body_idx = None
+        if hf_cfg.get("body_starts_new_section") and body_heading_idx is not None:
+            body_idx = sec_map.get(body_heading_idx, 0)
+        try:
+            hf_report = apply_headers_footers(doc, hf_cfg, body_idx)
+        except Exception as e:
+            hf_report = {"applied": False, "sections": 0,
+                         "warnings": [f"页眉页脚应用失败：{e}"]}
+        inject_report["warnings"] += hf_report.get("warnings", [])
+    tables_cfg = profile.get("tables") if isinstance(profile.get("tables"), dict) else {}
+    cell_style = tables_cfg.get("cell_style") if isinstance(tables_cfg.get("cell_style"), dict) else None
+    table_cells_n = 0
+    if cell_style:
+        try:
+            table_cells_n = restyle_table_cells(doc, cell_style)
+        except Exception as e:
+            inject_report["warnings"].append(f"表格单元格重排失败：{e}")
+
     protected = protect_object_paragraphs(doc, analysis)
-    tables_report = normalize_tables(doc, profile.get("tables") or {})
+    tables_report = normalize_tables(doc, tables_cfg)
     citations_cfg = profile.get("citations") or {}
     sup_n = normalize_citations(doc, analysis, assignment,
                                 citations_cfg.get("superscript", True))
@@ -492,6 +551,15 @@ def apply_profile_offline(profile: dict, docx_path, para_override: dict | None =
         content_cm = paper_w - margins.get("left_cm", 3.17) - margins.get("right_cm", 3.17)
         resized_n = resize_figures_to_reference(doc, analysis, objects_cfg, content_cm)
     fits = fit_oversized_figures(doc, analysis, profile.get("page") or {})
+    # ---- M2：目录域收尾处理。插入 TOC 段落会使其后段落号整体 +1，
+    # 因此必须在所有按 analysis 段落号定位的操作（防裁剪保护/引用上标/
+    # 图宽缩放）之后执行；updateFields 无论插入与否都写。
+    toc_report = {"inserted": False, "update_fields": False, "reason": ""}
+    try:
+        toc_report = apply_toc_updates(doc, profile.get("toc") or {}, body_heading_idx)
+    except Exception as e:
+        toc_report = {"inserted": False, "update_fields": False,
+                      "reason": f"目录域处理失败：{e}"}
     doc.save(str(docx_path))
 
     return {
@@ -511,6 +579,9 @@ def apply_profile_offline(profile: dict, docx_path, para_override: dict | None =
         "uncited_entries": analysis.uncited_entries,
         "figures_resized": resized_n + fits["resized"],
         "figures_float_skipped": fits["skipped_float"],
+        "header_footer": hf_report,
+        "toc": toc_report,
+        "table_cells": table_cells_n,
         "counts": counts,
         "styles": inject_report["styles"],
         "numbering": inject_report["numbering"],

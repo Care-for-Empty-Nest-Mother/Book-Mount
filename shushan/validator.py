@@ -228,7 +228,7 @@ def validate_profile(data):
                                     _err(errors, f"objects.figure.width_cm.{k}",
                                          "应为 0.5~40 之间的厘米值")
 
-    # ---- tables（跨页表格规范开关） ----
+    # ---- tables（跨页表格规范开关 + 单元格文字样式） ----
     tables = data.get("tables")
     if tables is not None:
         if not isinstance(tables, dict):
@@ -238,6 +238,30 @@ def validate_profile(data):
                 v = tables.get(k)
                 if v is not None and not isinstance(v, bool):
                     _err(errors, f"tables.{k}", "应为布尔值 true/false")
+            cell_style = tables.get("cell_style")
+            if cell_style is not None:
+                if not isinstance(cell_style, dict):
+                    _err(errors, "tables.cell_style", "应为对象")
+                else:
+                    for k in cell_style:
+                        if k not in ("font_cn", "font_en", "size_pt", "alignment", "bold"):
+                            _warn(warnings, f"tables.cell_style.{k}", "未知字段，将被忽略")
+                    for k in ("font_cn", "font_en"):
+                        v = cell_style.get(k)
+                        if v is not None and (not isinstance(v, str) or not v.strip()):
+                            _err(errors, f"tables.cell_style.{k}", "应为非空字符串")
+                    v = cell_style.get("size_pt")
+                    if v is not None and (not isinstance(v, (int, float))
+                                          or isinstance(v, bool) or not (1 <= v <= 200)):
+                        _err(errors, f"tables.cell_style.size_pt",
+                             f"应为 1~200 之间的磅值，当前为 {v!r}")
+                    v = cell_style.get("alignment")
+                    if v is not None and v not in ALIGNMENTS:
+                        _err(errors, "tables.cell_style.alignment",
+                             f'应为 {"/".join(ALIGNMENTS)} 之一，当前为 {v!r}')
+                    v = cell_style.get("bold")
+                    if v is not None and not isinstance(v, bool):
+                        _err(errors, "tables.cell_style.bold", "应为布尔值 true/false")
 
     # ---- citations（正文引用格式开关） ----
     citations = data.get("citations")
@@ -250,6 +274,78 @@ def validate_profile(data):
                 _err(errors, "citations.superscript",
                      "应为布尔值（true 时整稿把正文独立 [n] 标记统一为上标）")
 
+    # ---- header_footer（页眉页脚页码，M2） ----
+    hf = data.get("header_footer")
+    if hf is not None:
+        if not isinstance(hf, dict):
+            _err(errors, "header_footer", "应为对象")
+        else:
+            for k in hf:
+                if k not in ("header", "footer", "body_starts_new_section"):
+                    _warn(warnings, f"header_footer.{k}", "未知字段，将被忽略")
+            for side in ("header", "footer"):
+                sub = hf.get(side)
+                if sub is None:
+                    continue
+                path = f"header_footer.{side}"
+                if not isinstance(sub, dict):
+                    _err(errors, path, "应为对象")
+                    continue
+                for bk in ("enabled", "different_first", "different_odd_even"):
+                    v = sub.get(bk)
+                    if v is not None and not isinstance(v, bool):
+                        _err(errors, f"{path}.{bk}", "应为布尔值 true/false")
+                content = sub.get("content")
+                if content is not None and not isinstance(content, str):
+                    _err(errors, f"{path}.content", "应为字符串")
+                align = sub.get("align")
+                if align is not None and align not in ALIGNMENTS:
+                    _err(errors, f"{path}.align",
+                         f'应为 {"/".join(ALIGNMENTS)} 之一，当前为 {align!r}')
+                font = sub.get("font")
+                if font is not None:
+                    if not isinstance(font, dict):
+                        _err(errors, f"{path}.font", "应为对象")
+                    else:
+                        for fk in ("font_cn", "font_en"):
+                            fv = font.get(fk)
+                            if fv is not None and (not isinstance(fv, str) or not fv.strip()):
+                                _err(errors, f"{path}.font.{fk}", "应为非空字符串")
+                        fs = font.get("size_pt")
+                        if fs is not None and (not isinstance(fs, (int, float))
+                                               or isinstance(fs, bool)
+                                               or not (1 <= fs <= 200)):
+                            _err(errors, f"{path}.font.size_pt",
+                                 f"应为 1~200 之间的磅值，当前为 {fs!r}")
+            footer = hf.get("footer")
+            if isinstance(footer, dict):
+                pn = footer.get("page_number")
+                if pn is not None:
+                    if not isinstance(pn, dict):
+                        _err(errors, "header_footer.footer.page_number", "应为对象")
+                    else:
+                        pos = pn.get("position")
+                        if pos is not None and pos not in ("left", "center", "right"):
+                            _err(errors, "header_footer.footer.page_number.position",
+                                 '应为 "left"/"center"/"right"，当前为 {pos!r}'.format(pos=pos))
+                        fmt = pn.get("format")
+                        if fmt is not None and (not isinstance(fmt, str) or not fmt.strip()):
+                            _err(errors, "header_footer.footer.page_number.format",
+                                 "应为非空字符串（{page}/{pages} 为页码域占位符）")
+                        sa = pn.get("start_at")
+                        if sa is not None and (not isinstance(sa, int)
+                                               or isinstance(sa, bool)):
+                            _err(errors, "header_footer.footer.page_number.start_at",
+                                 "应为整数（通常为 1）")
+                        ss = pn.get("start_section")
+                        if ss is not None and ss not in ("body", "document"):
+                            _err(errors, "header_footer.footer.page_number.start_section",
+                                 '应为 "body"（正文起编）或 "document"（全文起编）')
+            bs = hf.get("body_starts_new_section")
+            if bs is not None and not isinstance(bs, bool):
+                _err(errors, "header_footer.body_starts_new_section",
+                     "应为布尔值 true/false")
+
     # ---- caption / toc 简查 ----
     caption = data.get("caption")
     if caption is not None and not isinstance(caption, dict):
@@ -258,9 +354,22 @@ def validate_profile(data):
     if toc is not None:
         if not isinstance(toc, dict):
             _err(errors, "toc", "应为对象")
-        elif "levels" in toc and (not isinstance(toc["levels"], int)
-                                  or not (1 <= toc["levels"] <= 3)):
-            _err(errors, "toc.levels", "应为 1~3 的整数")
+        else:
+            if "levels" in toc and (not isinstance(toc["levels"], int)
+                                    or not (1 <= toc["levels"] <= 3)):
+                _err(errors, "toc.levels", "应为 1~3 的整数")
+            for k in ("insert",):
+                v = toc.get(k)
+                if v is not None and not isinstance(v, bool):
+                    _err(errors, f"toc.{k}", "应为布尔值 true/false")
+            v = toc.get("leader")
+            if v is not None and v not in ("dot", "hyphen", "underscore", "none"):
+                _err(errors, "toc.leader",
+                     '应为 "dot"/"hyphen"/"underscore"/"none"，当前为 {v!r}'.format(v=v))
+            v = toc.get("page_number_align")
+            if v is not None and v not in ALIGNMENTS:
+                _err(errors, "toc.page_number_align",
+                     f'应为 {"/".join(ALIGNMENTS)} 之一，当前为 {v!r}')
 
     # ---- skeleton ----
     skeleton = data.get("skeleton")
