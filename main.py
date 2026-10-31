@@ -112,8 +112,16 @@ def main():
 
     args = parser.parse_args()
     if not args.cmd:
-        from shushan.gui.panel import run
-        run()
+        # 打包为无控制台 exe 后，任何启动异常都写入日志文件便于定位
+        try:
+            from shushan.gui.panel import run
+            run()
+        except Exception:
+            import traceback
+            from shushan.paths import APP_DIR
+            (APP_DIR / "启动错误.log").write_text(
+                traceback.format_exc(), encoding="utf-8")
+            raise
         return
     try:
         args.func(args)
