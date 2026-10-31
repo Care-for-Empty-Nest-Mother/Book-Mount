@@ -1,40 +1,50 @@
 # -*- coding: utf-8 -*-
-"""镜像 Word · 双栏对照格式工作台。
+"""书山主窗口 = 镜像 Word 双栏格式工作台（主界面与整稿台归一）。
 
-布局：顶部 = Word"开始"选项卡式功能区（字体/段落/样式三组，按钮外观与
-快捷键都与 Word 一致）；左栏 = 方案样式库（模板，样式卡按其格式渲染）；
-右栏 = 目标文档逐段预览（类型样式 + 逐段覆盖合并后的实际效果，保留
-批注式彩色标记）。点选段落即改格式（落到 fmt_overrides 引擎），
-"更新到类型样式"把所选格式提升为类型样式（Word"更新样式以匹配所选内容"
-的心智，仅影响本次整稿，不写回方案文件）。
+布局：顶栏（方案库 + 提取/导入/渲染/整稿应用/换文档/清理Word后台）→
+Word"开始"式功能区（字体/段落/样式/通用，按钮外观与快捷键同 Word）→
+双栏（左=模板样式库，随所选方案即时刷新；右=目标文档预览，彩色标记保留）→
+状态行（确认整稿/全部重置）→ 可折叠日志。
 
-Accepted 后暴露四个属性（与 ClassifyDialog 契约兼容 + 新增一项）：
-    assignment      {段落号: 类型}
-    numbered        {标题段落号: bool}
-    fmt_overrides   {段落号: 格式 spec}
-    style_edits     {类型id: 格式 spec}
+流程：启动即工作台（空态：左栏渲染所选方案样式卡，右栏引导）→
+「整稿应用…」选文档 → 双栏填充 → 点选段落即改格式 →「确认整稿」→
+报告写日志（窗口不关，可继续调整再次整稿或换文档）。
+
+确认整稿后窗口仍持有四态（与旧 WorkbenchDialog 契约一致）：
+    assignment / numbered / fmt_overrides / style_edits
 """
 import copy
 import html as _html
+import shutil
 from collections import Counter
+from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import (QColor, QFont, QKeySequence, QShortcut,
+from PySide6.QtGui import (QColor, QFont, QIcon, QKeySequence, QShortcut,
                            QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QHBoxLayout,
-                               QLabel, QPushButton, QSplitter, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QDoubleSpinBox, QFileDialog, QFrame, QGroupBox,
+                               QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+                               QPlainTextEdit, QPushButton, QSplitter,
+                               QToolButton, QVBoxLayout, QWidget)
 
-from ..analyzer.docx_analyzer import AnalysisResult
-from ..profile_builder import spec_to_fmt_patch
+from ..analyzer.docx_analyzer import AnalysisResult, analyze_document
+from ..convert import ensure_docx
+from ..profile import ProfileError, load_profile, save_profile
+from ..profile_builder import build_profile, spec_to_fmt_patch
+from ..render import apply_profile_offline
+from ..render.dotx_renderer import render_dotx
 from ..types import CN_FONT_SIZES, IGNORE_TYPE
-from .classify_dialog import (SELECT_COLOR, TYPE_ITEMS, _ManuscriptView,
-                              colors_of, fmt_detail, label_of)
+from ..word import cleanup as word_cleanup
+from .classify_dialog import (SELECT_COLOR, TYPE_ITEMS, ClassifyDialog,
+                              _ManuscriptView, colors_of, fmt_detail, label_of)
 from .font_picker import fill_font_combo, fill_size_combo, select_size
 from .format_edit_dialog import FormatEditDialog
+from .numbering_dialog import NumberingModeDialog
 from .preview_render import build_preview, insert_blocks, para_css
 from .word_icons import make_icon
+
+APP_TITLE = "书山 · 文献格式工坊"
 
 RIBBON_CSS = """
 QGroupBox { font-size: 11px; color: #666; border: 0; margin-top: 0; }
@@ -46,6 +56,7 @@ QToolButton:hover { background: #e7f5ff; border-color: #74c0fc; }
 QToolButton:checked { background: #d0ebff; border-color: #339af0; }
 QComboBox { font-size: 12px; }
 QDoubleSpinBox { font-size: 12px; }
+QPushButton { font-size: 12px; }
 """
 
 # 左栏样式卡的示例文字
@@ -66,14 +77,26 @@ SAMPLE_TEXT = {
     "quote": "引用段落示例", "note": "注释示例",
 }
 
-ALIGN_ORDER = ["left", "center", "right", "justify"]  # 顺序仅供展示参考
 LINE_ITEMS = [("multiple", 1.0), ("multiple", 1.15), ("multiple", 1.25),
               ("multiple", 1.5), ("multiple", 2.0), ("multiple", 2.5),
               ("multiple", 3.0)]
 
+EMPTY_GUIDE = """
+<p style="font-size:14pt; color:#1a3c34; margin:24pt 12pt 6pt 12pt">
+<b>书山 · 把中意文献的格式一键套用到你的文档</b></p>
+<p style="font-size:11pt; color:#495057; margin:2pt 12pt; line-height:1.7">
+① 顶部选择一个<b>格式方案</b>（左侧即它的样式库预览）<br>
+② 点 <b>「整稿应用…」</b> 选择你的 docx 文档<br>
+③ 点选段落（Shift 连选 / Ctrl 加选），用上方 Word 同款按键调整格式，
+   或点左栏样式卡定位同类段落<br>
+④ 点 <b>「确认整稿」</b> ——原文件自动备份，报告见下方日志</p>
+<p style="font-size:10pt; color:#868e96; margin:10pt 12pt">
+提示：没有方案？点「提取格式…」从一篇排版规范的文献学起。</p>
+"""
+
 
 def _fmt_to_spec(fmt: dict) -> dict:
-    """analyzer fmt 字典 → 格式 spec（方案 styles 同构），fmt_to_spec 的桥。"""
+    """analyzer fmt 字典 → 格式 spec（方案 styles 同构）。"""
     spec = {}
     if fmt.get("font_cn"):
         spec["font_cn"] = fmt["font_cn"]
@@ -107,63 +130,59 @@ def _fmt_to_spec(fmt: dict) -> dict:
     return spec
 
 
-class WorkbenchDialog(QDialog):
-    """双栏对照格式工作台。用法：
+class ShushanWorkbench(QMainWindow):
+    """书山主窗口：方案库 + 双栏对照工作台 + 整稿，一窗完成。"""
 
-        dlg = WorkbenchDialog(analysis, profile, 文档名, docx路径, parent)
-        if dlg.exec() == QDialog.Accepted:
-            apply_profile_offline(profile, docx, para_override=dlg.assignment,
-                                  numbered_map=dlg.numbered,
-                                  fmt_overrides=dlg.fmt_overrides)
-            profile["styles"].update(dlg.style_edits)   # 类型样式修改（可选）
-    """
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(APP_TITLE)
+        self.resize(1400, 820)
+        try:
+            from ..paths import ICON_FILE
+            if ICON_FILE.exists():
+                self.setWindowIcon(QIcon(str(ICON_FILE)))
+        except Exception:
+            pass
 
-    def __init__(self, analysis: AnalysisResult, profile: dict, doc_name: str,
-                 docx_path, parent=None):
-        super().__init__(parent)
-        self.analysis = analysis
-        self.profile = profile
-        self._docx_path = str(docx_path)
-        self.setWindowTitle(f"书山 · 格式工作台 —— {doc_name}")
-        self.resize(1400, 800)
-        self.paras = analysis.paragraphs
-        self._docx = None                       # 惰性打开（渲染表格/图片用）
-        self._styles: dict = dict(profile.get("styles") or {})
-        self.suggestion = {p.index: p.suggestion for p in analysis.nonempty()}
-        self.assignment: dict = dict(self.suggestion)
-        self.numbered: dict = {p.index: True for p in analysis.nonempty()
-                               if p.suggestion.startswith("heading_")}
+        self.profile: dict | None = None
+        self.profile_name: str = ""
+        self.analysis: AnalysisResult | None = None
+        self.work_path: str | None = None
+        self._docx = None
+
+        self.paras = []
+        self._styles: dict = {}
+        self.suggestion: dict = {}
+        self.assignment: dict = {}
+        self.numbered: dict = {}
         self.fmt_overrides: dict = {}
         self.style_edits: dict = {}
         self.selected: set = set()
         self._anchor: int | None = None
-        self._nonempty_idx = {p.index for p in analysis.nonempty()}
+        self._nonempty_idx: set = set()
         self._hover_block = None
-        self._echo = False                      # 功能区回显中（抑制信号）
+        self._echo = False
         self._undo_stack: list = []
         self._redo_stack: list = []
         self._p2b: dict = {}
         self._b2p: dict = {}
-        self._card_tid: list = []               # 左栏块号 → 类型
+        self._card_tid: list = []
         self._card_b2t: dict = {}
 
         self._build_ui()
         self._bind_shortcuts()
-        self._rebuild_cards()
-        self._rebuild_preview()
-        self._refresh_highlights()
-        self._sync_selection_label()
-        self._update_citation_label()
-        self._sync_ribbon()
+        self.refresh_profiles()
+        self._show_empty_state()
 
     # ================= UI 构建 =================
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setSpacing(4)
-        root.addWidget(QLabel(
-            "左=模板样式库（点卡片定位右栏同类段落）｜右=目标文档（点选段落，"
-            "顶部按键即改格式，Shift 连选 / Ctrl 加选 / Alt+点标题切对号）"))
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setSpacing(3)
+        root.setContentsMargins(6, 4, 6, 4)
 
+        root.addWidget(self._build_topbar())
         root.addWidget(self._build_ribbon())
 
         split = QSplitter(Qt.Horizontal)
@@ -171,12 +190,10 @@ class WorkbenchDialog(QDialog):
                                          lambda b: None, self._card_context,
                                          lambda b, pos: False)
         self.card_view.setFont(QFont("Microsoft YaHei", 10))
-        self.card_view.setPlaceholderText("（模板样式库）")
         self.view = _ManuscriptView(self._on_click, self._on_hover,
                                     self._on_alt_click, self._context_menu,
                                     self._on_double)
         self.view.setFont(QFont("Microsoft YaHei", 10))
-        self.view.setPlaceholderText("（目标文档预览）")
         split.addWidget(self.card_view)
         split.addWidget(self.view)
         split.setStretchFactor(0, 2)
@@ -188,23 +205,70 @@ class WorkbenchDialog(QDialog):
         self.citation_label.setWordWrap(True)
         self.citation_label.setStyleSheet("color:#8a6d1a; font-size:11px;")
         foot.addWidget(self.citation_label, stretch=1)
-        self.sel_label = QLabel("已选中 0 段")
+        self.sel_label = QLabel("未加载文档")
         foot.addWidget(self.sel_label)
+        self.btn_confirm = QPushButton("确认整稿")
+        self.btn_confirm.setToolTip("按当前对照结果整稿（原文件自动备份）；窗口不关闭，可继续调整")
+        self.btn_confirm.setStyleSheet(
+            "font-weight:600; padding:4px 14px; background:#d3f9d8;")
+        self.btn_confirm.clicked.connect(self._apply_now)
+        foot.addWidget(self.btn_confirm)
+        self.btn_reset = QPushButton("全部重置")
+        self.btn_reset.clicked.connect(self._on_reset)
+        foot.addWidget(self.btn_reset)
         root.addLayout(foot)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("确认整稿")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        btn_reset = QPushButton("全部重置")
-        btn_reset.clicked.connect(self._on_reset)
-        buttons.addButton(btn_reset, QDialogButtonBox.ActionRole)
-        root.addWidget(buttons)
+        # 可折叠日志
+        log_row = QHBoxLayout()
+        self.btn_log = QPushButton("日志 ▾")
+        self.btn_log.setFlat(True)
+        self.btn_log.setStyleSheet("color:#495057; font-size:11px;")
+        self.btn_log.clicked.connect(self._toggle_log)
+        log_row.addWidget(self.btn_log)
+        log_row.addStretch(1)
+        root.addLayout(log_row)
+        self.log = _LogView()
+        root.addWidget(self.log)
 
-    # ---------- 功能区（Word 开始选项卡分布） ----------
+    def _build_topbar(self) -> QWidget:
+        bar = QWidget()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(5)
+        lay.addWidget(QLabel("方案:"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.setMinimumWidth(210)
+        self.profile_combo.setToolTip("格式方案库（profiles/）")
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_combo)
+        lay.addWidget(self.profile_combo, stretch=2)
+        for text, tip, slot in (
+                ("提取格式…", "从一篇排版规范的文献提取格式方案（弹批注视图）",
+                 self.on_extract),
+                ("导入…", "导入 .fprof.json 方案文件", self.on_import),
+                ("渲染模板…", "方案 → .dotx Word 模板", self.on_render),
+                ("删除", "删除选中的方案（不可恢复）", self.on_delete_profile)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            lay.addWidget(b)
+        sep = QFrame(); sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color:#d0d0d0")
+        lay.addWidget(sep)
+        self.btn_pick_doc = QPushButton("整稿应用…")
+        self.btn_pick_doc.setToolTip("选择目标文档并载入双栏预览")
+        self.btn_pick_doc.setStyleSheet("font-weight:600; background:#d0ebff;")
+        self.btn_pick_doc.clicked.connect(self._pick_and_load_document)
+        lay.addWidget(self.btn_pick_doc)
+        self.btn_cleanup_word = QPushButton("清理Word后台")
+        self.btn_cleanup_word.setToolTip(
+            "结束后台残留的 Word 进程（自动化残留）；\n"
+            "你正在使用的、有窗口的 Word 不受影响")
+        self.btn_cleanup_word.clicked.connect(self.on_cleanup_word)
+        lay.addWidget(self.btn_cleanup_word)
+        lay.addStretch(1)
+        return bar
+
     def _build_ribbon(self) -> QWidget:
-        from PySide6.QtWidgets import QFrame, QGroupBox
         bar = QWidget()
         bar.setStyleSheet(RIBBON_CSS)
         lay = QHBoxLayout(bar)
@@ -379,20 +443,250 @@ class WorkbenchDialog(QDialog):
             sc = QShortcut(QKeySequence(seq), self)
             sc.activated.connect(slot)
 
+    # ================= 日志 =================
+    def log_line(self, text: str):
+        self.log.append_line(text)
+
+    def _toggle_log(self):
+        self.log.toggle()
+
+    # ================= 方案库（顶栏动作，自 panel.py 迁移） =================
+    def refresh_profiles(self):
+        from ..paths import PROFILES_DIR
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        names = sorted(p.name for p in PROFILES_DIR.glob("*.fprof.json"))
+        self.profile_combo.addItem("（未选择方案）", None)
+        for name in names:
+            self.profile_combo.addItem(name, name)
+        self.profile_combo.blockSignals(False)
+        self.profile_combo.setCurrentIndex(1 if names else 0)   # 触发 _on_profile_combo
+
+    def _on_profile_combo(self, _i=None):
+        name = self.profile_combo.currentData()
+        if not name:
+            self.use_profile(None, "")
+            return
+        from ..paths import PROFILES_DIR
+        try:
+            data = load_profile(PROFILES_DIR / name)
+        except ProfileError as e:
+            QMessageBox.critical(self, APP_TITLE, str(e))
+            return
+        self.use_profile(data, name)
+
+    def use_profile(self, profile: dict | None, name: str = ""):
+        """切换当前方案（顶栏下拉与测试共用）。文档已加载时按新方案重渲染。"""
+        self.profile = profile
+        self.profile_name = name
+        self._styles = dict((profile or {}).get("styles") or {})
+        self.style_edits = {}               # 样式修改属于旧方案，随切换清空
+        if self.analysis is None:
+            self._rebuild_cards()
+            return
+        self.log_line(f"[方案] 已切换为「{name}」——双栏按新方案重渲染")
+        self._rebuild_cards()
+        self._rebuild_preview()
+        self._refresh_highlights()
+        self._sync_ribbon()
+
+    # ---- 提取 / 导入 / 渲染 / 删除（原 panel.py 逻辑） ----
+    def on_extract(self):
+        src, _ = QFileDialog.getOpenFileName(self, "选择要提取格式的参考文献",
+                                             "", "Word 文档 (*.docx *.doc)")
+        if not src:
+            return
+        try:
+            analysis_path, converted = ensure_docx(src)
+            if converted:
+                self.log_line(f"[转换] {Path(src).name} → {Path(converted).name}"
+                              f"（原文件未动）")
+            analysis = analyze_document(analysis_path)
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE, f"分析失败：{e}")
+            return
+        analysis.source_path = str(src)
+        dlg = ClassifyDialog(analysis, Path(src).name, self)
+        if dlg.exec() != ClassifyDialog.Accepted:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        default_name = Path(src).stem + " 的格式"
+        name, ok = QInputDialog.getText(self, "方案名称", "名称：",
+                                        text=default_name)
+        name = (name or "").strip()
+        if not (ok and name):
+            return
+        profile = build_profile(analysis, dlg.assignment, name=name, source="docx",
+                                fmt_overrides=dlg.fmt_overrides)
+        from ..paths import PROFILES_DIR
+        out = PROFILES_DIR / f"{name}.fprof.json"
+        try:
+            save_profile(profile, out)
+        except ProfileError as e:
+            QMessageBox.critical(self, APP_TITLE, str(e))
+            return
+        self.refresh_profiles()
+        self.log_line(f"[提取] {src} → {out.name}"
+                      f"（{len(profile.get('styles', {}))} 类格式）")
+
+    def on_import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择格式方案 JSON", "", "书山格式方案 (*.fprof.json *.fprof *.json)")
+        if not path:
+            return
+        try:
+            data = load_profile(path)
+        except ProfileError as e:
+            QMessageBox.critical(self, APP_TITLE, str(e))
+            return
+        from ..paths import PROFILES_DIR
+        dest = PROFILES_DIR / Path(path).name
+        shutil.copy2(path, dest)
+        self.refresh_profiles()
+        self.log_line(f"[导入] {Path(path).name} —— {data.get('meta', {}).get('name', '')}")
+
+    def on_render(self):
+        if not self._require_profile():
+            return
+        from ..paths import PROFILES_DIR
+        stem = Path(self.profile_name).stem if self.profile_name else \
+            (self.profile.get("meta", {}).get("name") or "方案")
+        default_out = PROFILES_DIR / f"{stem}.dotx"
+        out, _ = QFileDialog.getSaveFileName(self, "保存 Word 模板",
+                                             str(default_out), "Word 模板 (*.dotx)")
+        if not out:
+            return
+        try:
+            render_dotx(self.profile, out)
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE, f"渲染失败：{e}")
+            return
+        self.log_line(f"[渲染] {self.profile_name} → {out}\n        "
+                      f"在 Word 中：文件→选项→加载项→管理:模板→选用 该模板并勾选"
+                      f"「自动更新文档样式」即可换装。")
+
+    def on_delete_profile(self):
+        name = self.profile_combo.currentData()
+        if not name:
+            QMessageBox.information(self, APP_TITLE, "请先在方案下拉中选择一个方案。")
+            return
+        from ..paths import PROFILES_DIR
+        ppath = PROFILES_DIR / name
+        if not ppath.exists():
+            QMessageBox.warning(self, APP_TITLE, f"方案文件不存在：{name}")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_TITLE)
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"确定删除方案「{name}」吗？\n删除后不可恢复"
+                    f"（渲染出的 .dotx 模板不受影响）。")
+        yes = box.addButton("删除", QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not yes:
+            self.log_line(f"[删除] 已取消：{name}")
+            return
+        try:
+            ppath.unlink()
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE, f"删除失败：{e}")
+            return
+        self.refresh_profiles()
+        self.log_line(f"[删除] {name} 已删除")
+
+    def on_cleanup_word(self):
+        try:
+            rep = word_cleanup.cleanup_word_background()
+        except ImportError:
+            QMessageBox.warning(self, APP_TITLE, "清理 Word 后台需要 pywin32 组件。")
+            return
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE, f"清理失败：{e}")
+            return
+        if rep["found"] == 0:
+            self.log_line("[Word后台] 未发现 Word 进程")
+        else:
+            msg = (f"发现 {rep['found']} 个 Word 进程：结束后台 {len(rep['killed'])} 个")
+            if rep["kept"]:
+                msg += f"，保留可见窗口 {len(rep['kept'])} 个（你正在用的）"
+            if rep["failed"]:
+                msg += f"，{len(rep['failed'])} 个结束失败"
+            self.log_line(f"[Word后台] {msg}")
+
+    def _require_profile(self) -> bool:
+        if self.profile is None:
+            QMessageBox.information(self, APP_TITLE,
+                                    "请先在顶部方案下拉中选择一个格式方案。")
+            return False
+        return True
+
+    # ================= 文档载入 / 空态 =================
+    def _pick_and_load_document(self):
+        if not self._require_profile():
+            return
+        src, _ = QFileDialog.getOpenFileName(self, "选择待整稿的文档", "",
+                                             "Word 文档 (*.docx *.doc)")
+        if not src:
+            return
+        self.load_document(src)
+
+    def load_document(self, src: str):
+        """选定的目标文档载入双栏（顶栏与测试共用）。"""
+        if not self._require_profile():
+            return
+        try:
+            work_path, converted = ensure_docx(src)
+            if converted:
+                self.log_line(f"[转换] {Path(src).name} → {Path(converted).name}"
+                              f"（整稿写入转换件，原 .doc 保持只读）")
+            analysis = analyze_document(work_path)
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE, f"分析失败：{e}")
+            return
+        self.work_path = str(work_path)
+        self.analysis = analysis
+        self.paras = analysis.paragraphs
+        self._docx = None
+        self._nonempty_idx = {p.index for p in analysis.nonempty()}
+        self.suggestion = {p.index: p.suggestion for p in analysis.nonempty()}
+        self.assignment = dict(self.suggestion)
+        self.numbered = {p.index: True for p in analysis.nonempty()
+                         if p.suggestion.startswith("heading_")}
+        self.fmt_overrides = {}
+        self.style_edits = {}
+        self.selected = set()
+        self._anchor = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self.btn_pick_doc.setText("换文档…")
+        self.btn_confirm.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+        self._ribbon_set_enabled(True)
+        self._rebuild_cards()
+        self._rebuild_preview()
+        self._refresh_highlights()
+        self._sync_selection_label()
+        self._update_citation_label()
+        self._sync_ribbon()
+        self.log_line(f"[载入] {Path(src).name}（{len(list(analysis.nonempty()))} 段待归类）"
+                      f"——对照调整后点「确认整稿」")
+
+    def _show_empty_state(self):
+        self.btn_confirm.setEnabled(False)
+        self.btn_reset.setEnabled(False)
+        self._ribbon_set_enabled(False)
+        self.sel_label.setText("未加载文档")
+        self.view.setHtml(EMPTY_GUIDE.replace("its", "它的"))
+        self._p2b, self._b2p = {}, {}
+
     # ================= 数据视图 =================
     def _merged_styles(self, tid: str) -> dict | None:
-        """类型最终样式 spec = 方案 styles + 本次 style_edits。无定义返回 None。"""
         spec = dict(self._styles.get(tid) or {})
         if tid in self.style_edits:
             spec = {**spec, **self.style_edits[tid]}
         return spec or None
 
     def _fmt_of(self, idx: int) -> dict | None:
-        """右栏渲染用"整稿后实际生效格式"。
-
-        ignore 段与"仅大纲级别"标题保持原格式；其余 = 类型样式 patch +
-        逐段覆盖 patch（整稿会清直接格式，原 fmt 不参与合成）。
-        """
         p = self.paras[idx]
         tid = self.assignment.get(idx, p.suggestion)
         if p.fmt is None:
@@ -429,20 +723,23 @@ class WorkbenchDialog(QDialog):
         return mark, badge
 
     def _cell_css(self, cell) -> str:
-        """表格单元格统一 CSS = 正文样式 + tables.cell_style（整稿行为一致）。"""
         cs = dict(self._merged_styles("body_text") or {})
-        cs = {**cs, **(self.profile.get("tables") or {}).get("cell_style", {})}
+        cs = {**cs, **((self.profile or {}).get("tables") or {}).get("cell_style", {})}
         return para_css(spec_to_fmt_patch(cs)) if cs else ""
 
     def _rebuild_preview(self):
         from docx import Document
+        if self.analysis is None:
+            return
         if self._docx is None:
-            self._docx = Document(self._docx_path)
+            self._docx = Document(self.work_path)
         self._p2b, self._b2p = build_preview(
             self.view.document(), self.analysis, self._docx,
             self._fmt_of, self._badge_of, cell_css=self._cell_css)
 
     def _refresh_highlights(self):
+        if self.analysis is None:
+            return
         doc = self.view.document()
         sels = []
         for idx, block_no in self._p2b.items():
@@ -463,7 +760,6 @@ class WorkbenchDialog(QDialog):
             sel.format = fmt
             sels.append(sel)
         self.view.setExtraSelections(sels)
-        # 左栏：当前类型卡高亮
         csels = []
         maj = self._majority_type()
         cdoc = self.card_view.document()
@@ -483,13 +779,20 @@ class WorkbenchDialog(QDialog):
         self.card_view.setExtraSelections(csels)
 
     def _rebuild_cards(self):
-        frags = []
         self._card_tid = []
+        frags = []
+        if self.profile is None:
+            frags.append('<p style="font-size:11pt; color:#868e96; margin:10pt">'
+                         "（请先在顶部选择一个格式方案）</p>")
+            self._card_b2t = {b: tid for b, tid in zip(
+                insert_blocks(self.card_view.document(), frags), self._card_tid)}
+            return
         order = [tid for tid, _label in TYPE_ITEMS]
         shown = [tid for tid in order if self._merged_styles(tid)]
-        # 目标文档用到但方案未定义的类型，也列出（提示保持原样）
-        used = {self.assignment.get(p.index, p.suggestion)
-                for p in self.analysis.nonempty()}
+        used = set()
+        if self.analysis is not None:
+            used = {self.assignment.get(p.index, p.suggestion)
+                    for p in self.analysis.nonempty()}
         extra = [tid for tid in order if tid in used and tid not in shown]
         for tid in shown + extra:
             spec = self._merged_styles(tid) or {}
@@ -510,10 +813,11 @@ class WorkbenchDialog(QDialog):
 
     # ================= 选择与联动 =================
     def _scope(self) -> set:
-        return {i for i in self.selected if self.paras[i].fmt is not None}
+        return {i for i in self.selected
+                if self.analysis is not None and self.paras[i].fmt is not None}
 
     def _majority_type(self) -> str | None:
-        if not self.selected:
+        if not self.selected or self.analysis is None:
             return None
         return Counter(self.assignment.get(i, self.paras[i].suggestion)
                        for i in self.selected).most_common(1)[0][0]
@@ -535,7 +839,7 @@ class WorkbenchDialog(QDialog):
 
     def _on_card_click(self, block_no, modifiers):
         tid = self._card_b2t.get(block_no)
-        if tid is None:
+        if tid is None or self.analysis is None:
             return
         targets = sorted(i for i in self._nonempty_idx
                          if self.assignment.get(i, self.paras[i].suggestion) == tid)
@@ -555,10 +859,15 @@ class WorkbenchDialog(QDialog):
 
     def _sync_selection_label(self):
         n = len(self.selected)
+        if self.analysis is None:
+            self.sel_label.setText("未加载文档")
+            return
         maj = self._majority_type()
         self.sel_label.setText(f"已选中 {n} 段" + (f" · 类型 {label_of(maj)}" if maj else ""))
 
     def _select_all(self):
+        if self.analysis is None:
+            return
         self.selected = set(self._nonempty_idx)
         self._anchor = min(self.selected) if self.selected else None
         self._after_selection_change()
@@ -582,7 +891,7 @@ class WorkbenchDialog(QDialog):
             return
         self._hover_block = block_no
         idx = self._b2p.get(block_no)
-        if idx is None:
+        if idx is None or self.analysis is None:
             QToolTip.hideText()
             return
         p = self.paras[idx]
@@ -601,7 +910,8 @@ class WorkbenchDialog(QDialog):
         if tid is None:
             return
         spec = self._merged_styles(tid) or {}
-        QToolTip.showText(global_pos, f"{label_of(tid)}\n{fmt_detail(spec_to_fmt_patch(spec))}",
+        QToolTip.showText(global_pos,
+                          f"{label_of(tid)}\n{fmt_detail(spec_to_fmt_patch(spec))}",
                           self.card_view)
 
     def _card_context(self, block_no, global_pos):
@@ -619,12 +929,12 @@ class WorkbenchDialog(QDialog):
         self._refresh_after_edit()
 
     def _on_double(self, block_no, global_pos):
-        return False                       # 引用互跳沿用右键（v1 精简）
+        return False
 
     def _context_menu(self, block_no, global_pos):
         from PySide6.QtWidgets import QMenu
         idx = self._b2p.get(block_no)
-        if idx is None:
+        if idx is None or self.analysis is None:
             return
         menu = QMenu(self)
         if idx in self.selected and self.selected:
@@ -672,7 +982,6 @@ class WorkbenchDialog(QDialog):
         self._refresh_after_edit(cards=True)
 
     def _majority_fmt(self) -> dict:
-        """选中段（可归类）生效格式的多数派——功能区回显与快捷键基准。"""
         fmts = [self._fmt_of(i) for i in sorted(self._scope())]
         if not fmts:
             return {}
@@ -689,7 +998,6 @@ class WorkbenchDialog(QDialog):
         return out
 
     def _apply_spec(self, patch: dict):
-        """把 patch 并入选中段每段的 fmt_overrides（一次撤销单位）。"""
         scope = self._scope()
         if not scope or not patch:
             return
@@ -753,12 +1061,7 @@ class WorkbenchDialog(QDialog):
         fmt = self._majority_fmt()
         cur = fmt.get("first_chars") or 0.0
         new = round(max(-10.0, min(20.0, cur + delta)), 2)
-        patch = {}
-        if new == 0:
-            patch["first_line_indent"] = {"unit": "chars", "value": 0}
-        else:
-            patch["first_line_indent"] = {"unit": "chars", "value": new}
-        self._apply_spec(patch)
+        self._apply_spec({"first_line_indent": {"unit": "chars", "value": new}})
 
     def _on_before_changed(self, v):
         if self._echo or not self.selected:
@@ -771,7 +1074,6 @@ class WorkbenchDialog(QDialog):
         self._apply_spec({"space_after_pt": round(v, 1)})
 
     def _pick_color(self):
-        from PySide6.QtWidgets import QColorDialog
         c = QColorDialog.getColor(QColor(self.color), self, "字体颜色")
         if not c.isValid():
             return
@@ -798,7 +1100,7 @@ class WorkbenchDialog(QDialog):
         self._refresh_after_edit()
 
     def _reassign_to(self, tid: str):
-        if not self.selected:
+        if not self.selected or self.analysis is None:
             return
         self._push_undo()
         for i in self.selected:
@@ -815,7 +1117,6 @@ class WorkbenchDialog(QDialog):
             self._reassign_to(tid)
 
     def _update_style(self):
-        """把选中段多数派格式提升为该类型的样式（style_edits）。"""
         scope = self._scope()
         tid = self._majority_type()
         if not scope or not tid or tid == IGNORE_TYPE:
@@ -825,9 +1126,13 @@ class WorkbenchDialog(QDialog):
             return
         self._push_undo()
         self.style_edits[tid] = {**(self.style_edits.get(tid) or {}), **spec}
+        self.log_line(f"[样式] 「{label_of(tid)}」已按所选内容更新"
+                      f"（仅本次整稿生效）")
         self._refresh_after_edit(cards=True)
 
     def _on_reset(self):
+        if self.analysis is None:
+            return
         self._push_undo()
         self.assignment = dict(self.suggestion)
         self.fmt_overrides.clear()
@@ -845,6 +1150,94 @@ class WorkbenchDialog(QDialog):
         self._update_citation_label()
         self._sync_ribbon()
 
+    # ================= 整稿（窗口内，不关窗） =================
+    def _apply_now(self, numbering_override="__dialog__"):
+        """确认整稿：style_edits 合并 → 编号模式 → apply → 日志。
+
+        numbering_override：测试/高级用法直接传 (mode, scheme_levels) 跳过弹窗；
+        缺省 "__dialog__" 时弹编号模式确认。
+        """
+        if self.analysis is None or self.work_path is None:
+            QMessageBox.information(self, APP_TITLE, "请先「整稿应用…」选择目标文档。")
+            return
+        profile = copy.deepcopy(self.profile or {})
+        if self.style_edits:
+            profile.setdefault("styles", {}).update(copy.deepcopy(self.style_edits))
+        assignment = dict(self.assignment)
+        if numbering_override == "__dialog__":
+            override = self._ask_numbering_mode(assignment)
+            if override is None:
+                self.log_line("[整稿] 已取消（编号模式未确认）")
+                return
+        else:
+            override = numbering_override
+        try:
+            report = apply_profile_offline(
+                profile, self.work_path, para_override=assignment,
+                numbering_override=override,
+                numbered_map=dict(self.numbered),
+                fmt_overrides=dict(self.fmt_overrides))
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE, f"整稿失败：{e}")
+            self.log_line(f"[整稿] 失败：{e}")
+            return
+        self._log_report(report)
+        # 整稿已写入磁盘（目录域插入等会使段落号位移）——按整稿后的真实状态
+        # 重载分析，四态回到干净基线，用户可继续微调或换文档
+        self.load_document(self.work_path)
+
+    def _ask_numbering_mode(self, assignment):
+        from ..render.apply import detect_numbering_mode
+        detected = detect_numbering_mode(self.analysis, assignment)
+        ndlg = NumberingModeDialog(detected, self)
+        if ndlg.exec() != NumberingModeDialog.Accepted:
+            return None
+        override = ndlg.result_override()
+        self.log_line(f"[编号模式] {override[0]}"
+                      + ("（自定义编号样式）" if override[0] == "custom" else ""))
+        return override
+
+    def _log_report(self, report: dict):
+        from ..types import DEFAULT_CN_NAMES
+        self.log_line(f"[整稿] {Path(self.work_path).name}")
+        msg = (f"已整稿 {report['paragraphs']} 段："
+               + "、".join(f"{DEFAULT_CN_NAMES.get(k, k)}×{v}"
+                           for k, v in sorted(report["counts"].items())))
+        self.log_line("        " + msg)
+        if report.get("backup"):
+            self.log_line(f"        备份：{report['backup']}")
+        if report.get("manual_numbering_kept"):
+            self.log_line("        检测到手工编号，已保留文字编号、未启用自动编号")
+        if report.get("protected_objects"):
+            self.log_line(f"        图形/公式段防裁剪保护：{report['protected_objects']} 段")
+        if report.get("headings_outline_only"):
+            self.log_line(f"        {report['headings_outline_only']} 个标题按对号只设定大纲级别")
+        if report.get("figures_resized"):
+            self.log_line(f"        图片宽度调整：{report['figures_resized']} 张")
+        if report.get("citations_superscripted"):
+            self.log_line(f"        引用标记上标规范化：{report['citations_superscripted']} 处")
+        if report.get("table_cells"):
+            self.log_line(f"        表格单元格重排：{report['table_cells']} 段"
+                          f"（tables.cell_style）")
+        hf_rep = report.get("header_footer") or {}
+        if hf_rep.get("applied"):
+            self.log_line(f"        页眉页脚：已写入 {hf_rep.get('sections', 0)} 节"
+                          f"（header_footer）")
+        toc_rep = report.get("toc") or {}
+        if toc_rep.get("inserted"):
+            self.log_line("        目录域已插入（Word 中右键 → 更新域 生成条目）")
+        elif toc_rep.get("reason"):
+            self.log_line(f"        目录域：{toc_rep['reason']}")
+        if report.get("dangling_citations"):
+            nums = "、".join(f"[{n}]" for n in report["dangling_citations"])
+            self.log_line(f"        ⚠ 悬空引用 {nums}：正文引用了不存在的文献条目")
+        if report.get("uncited_entries"):
+            nums = "、".join(f"[{n}]" for n in report["uncited_entries"][:8])
+            self.log_line(f"        ⚠ {len(report['uncited_entries'])} 条文献未被正文引用：{nums}")
+        for w in report.get("warnings", [])[:10]:
+            self.log_line(f"        ⚠ {w}")
+        self.log.expand()
+
     # ================= 功能区回显 =================
     def _ribbon_set_enabled(self, on: bool):
         for w in (self.font_combo, self.size_combo, self.btn_bold, self.btn_italic,
@@ -857,9 +1250,9 @@ class WorkbenchDialog(QDialog):
     def _sync_ribbon(self):
         scope = self._scope()
         self._ribbon_set_enabled(bool(scope))
+        self.btn_undo.setEnabled(bool(self._undo_stack))
+        self.btn_redo.setEnabled(bool(self._redo_stack))
         if not scope:
-            self.btn_undo.setEnabled(bool(self._undo_stack))
-            self.btn_redo.setEnabled(bool(self._redo_stack))
             return
         fmt = self._majority_fmt()
         self._echo = True
@@ -886,10 +1279,11 @@ class WorkbenchDialog(QDialog):
                 self.type_combo.setCurrentIndex(pos)
         finally:
             self._echo = False
-        self.btn_undo.setEnabled(bool(self._undo_stack))
-        self.btn_redo.setEnabled(bool(self._redo_stack))
 
     def _update_citation_label(self):
+        if self.analysis is None:
+            self.citation_label.setText("")
+            return
         a = self.analysis
         if not a.ref_entries and not a.citation_positions:
             self.citation_label.setText("")
@@ -897,13 +1291,42 @@ class WorkbenchDialog(QDialog):
         parts = []
         if a.dangling_citations:
             nums = "、".join(f"[{n}]" for n in a.dangling_citations)
-            parts.append(f"⚠ 悬空引用 {nums}")
+            parts.append(f"⚠ 悬空引用 {nums}（正文引用了不存在的条目）")
         if a.uncited_entries:
             nums = "、".join(f"[{n}]" for n in a.uncited_entries[:8])
-            parts.append(f"⚠ {len(a.uncited_entries)} 条文献未被引用：{nums}")
+            more = "…" if len(a.uncited_entries) > 8 else ""
+            parts.append(f"⚠ {len(a.uncited_entries)} 条文献未被正文引用：{nums}{more}")
         if parts:
             self.citation_label.setText("引用检查：" + "；".join(parts))
         else:
             self.citation_label.setText(
                 f"引用检查 ✓ {len(a.ref_entries)} 条文献与正文引用一一对应")
             self.citation_label.setStyleSheet("color:#1a6b45; font-size:11px;")
+
+
+class _LogView(QPlainTextEdit):
+    """可折叠日志：收起时显示最近一行，展开后滚动到底。"""
+
+    def __init__(self):
+        super().__init__()
+        self.setReadOnly(True)
+        self.setMaximumHeight(26)
+        self.setPlaceholderText("操作日志…")
+        self._expanded = False
+
+    def append_line(self, text: str):
+        self.appendPlainText(text)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+    def expand(self):
+        if not self._expanded:
+            self.toggle()
+
+    def toggle(self):
+        self._expanded = not self._expanded
+        self.setMaximumHeight(160 if self._expanded else 26)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+
+
+# 兼容别名：旧调用仍可用 WorkbenchDialog 名字拿到主窗口类
+WorkbenchDialog = ShushanWorkbench
