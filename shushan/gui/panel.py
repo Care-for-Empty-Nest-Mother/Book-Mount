@@ -3,6 +3,7 @@
 import shutil
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QListWidget,
                                QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QVBoxLayout, QWidget)
@@ -24,6 +25,9 @@ class ShushanPanel(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
+        from ..paths import ICON_FILE
+        if ICON_FILE.exists():
+            self.setWindowIcon(QIcon(str(ICON_FILE)))
         self.resize(560, 640)
         self._build_ui()
         try:

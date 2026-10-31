@@ -10,6 +10,10 @@ else:
     APP_DIR = Path(__file__).resolve().parent.parent   # 书山/
 PROFILES_DIR = APP_DIR / "profiles"
 EXAMPLES_DIR = APP_DIR / "examples"
+ICON_FILE = APP_DIR / "assets" / "bookmount.ico"
+if not ICON_FILE.exists():
+    # 冻结模式下数据文件在 _internal 里
+    ICON_FILE = Path(__file__).resolve().parent.parent / "assets" / "bookmount.ico"
 
 
 def _ensure_profiles_dir():

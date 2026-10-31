@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('profiles/学位论文示例.fprof.json', 'profiles')],
+    datas=[('profiles/学位论文示例.fprof.json', 'profiles'), ('assets/bookmount.ico', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/bookmount.ico'],
 )
 coll = COLLECT(
     exe,
