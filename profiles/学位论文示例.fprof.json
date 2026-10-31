@@ -125,6 +125,12 @@
       ]
     }
   },
+  "tables": {
+    "repeat_header": true,
+    "cant_split_rows": true,
+    "cell_style": {"font_cn": "宋体", "font_en": "Times New Roman",
+                   "size_pt": 10.5, "alignment": "center"}
+  },
   "header_footer": {
     "header": {
       "enabled": true,
