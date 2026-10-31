@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout
 
 from ..analyzer.docx_analyzer import AnalysisResult
 from ..types import CONTENT_TYPES, DEFAULT_CN_NAMES, IGNORE_TYPE
-from .format_edit_dialog import FormatEditDialog, spec_to_fmt_patch
+from .format_edit_dialog import FormatEditDialog
+from ..profile_builder import spec_to_fmt_patch
 
 # 各类型 (段落底色, 标签底色)；底色 None = 不着色（正文保持纸面白）
 TYPE_COLORS = {

@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
-from . import com_client
+from . import cleanup
 
-__all__ = ["com_client"]
+__all__ = ["cleanup"]

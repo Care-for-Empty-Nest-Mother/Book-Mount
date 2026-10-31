@@ -5,11 +5,12 @@ from pathlib import Path
 
 import docx
 
+from docx.oxml.ns import qn
+
 from .effective import (StylesDB, theme_fonts, effective_para_format,
                         format_signature, read_page_setup,
                         paragraph_has_object, object_kind, figure_extents_cm,
-                        parse_citations, RE_CITATION)
-from docx.oxml.ns import qn
+                        parse_citations, RE_LIT_NUM)
 
 
 @dataclass
@@ -116,12 +117,11 @@ def analyze_document(path) -> AnalysisResult:
     result.citation_count = _count_citations(result.nonempty())
 
     # ---- 引用与文献的对应关系、完整性检查 ----
-    import re as _re
     seq = 0
     for p in result.nonempty():
         if p.suggestion == "reference":
             seq += 1
-            m2 = _re.match(r'^\s*\[(\d{1,3})\]', p.text)
+            m2 = RE_LIT_NUM.match(p.text)
             result.ref_entries[p.index] = int(m2.group(1)) if m2 else seq
     for p in result.nonempty():
         for n in p.citations:

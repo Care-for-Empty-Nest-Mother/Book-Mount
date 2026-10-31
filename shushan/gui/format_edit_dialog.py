@@ -4,7 +4,6 @@
 确定后返回一份格式 spec（与方案 styles 里同构的字段子集），作为选中段落的
 格式覆盖：整稿时以直接格式落地（优先于样式），提取时参与该类型代表格式的投票。
 """
-from ..profile_builder import spec_to_fmt_patch  # noqa: F401 （再导出供测试）
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,

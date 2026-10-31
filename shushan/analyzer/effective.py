@@ -327,6 +327,7 @@ def read_page_setup(document) -> dict:
 import re as _re
 
 RE_CITATION = _re.compile(r"\[(\d{1,3}(?:\s*[-,，~]\s*\d{1,3})*)\]")
+RE_LIT_NUM = _re.compile(r"^\s*\[(\d{1,3})\]")
 
 
 def parse_citations(text: str, max_expand: int = 60) -> set:
