@@ -10,7 +10,7 @@ from docx.oxml.ns import qn
 from .effective import (StylesDB, theme_fonts, effective_para_format,
                         format_signature, read_page_setup,
                         paragraph_has_object, object_kind, figure_extents_cm,
-                        parse_citations, RE_LIT_NUM, parse_ppr)
+                        parse_citations, RE_LIT_NUM, parse_ppr, parse_rpr)
 
 
 @dataclass
@@ -153,16 +153,35 @@ def _extract_header_footer(doc, sdb: StylesDB) -> dict:
         if header_cfg is None:
             try:
                 if not sec.header.is_linked_to_previous:
-                    paras = [p for p in sec.header.paragraphs if p.text.strip()]
+                    # 遍历全部后代段落：页眉内容可能位于 sdt 内容控件、
+                    # 表格或文本框内（python-docx 的 .paragraphs 只看直接子级）
+                    paras = [p for p in sec.header._element.iter(qn("w:p"))
+                             if "".join(t.text or "" for t in p.findall(".//" + qn("w:t"))).strip()]
                     if paras:
                         p0 = paras[0]
-                        align = parse_ppr(p0._p).get("align") or "center"
-                        fmt = effective_para_format(p0, sdb)
+                        align = parse_ppr(p0).get("align") or "center"
+                        # 裸 w:p 元素：样式链解析 + 段落直接格式 + 首个非空 run
+                        ppr0 = p0.find(qn("w:pPr"))
+                        sid = None
+                        if ppr0 is not None:
+                            ps = ppr0.find(qn("w:pStyle"))
+                            if ps is not None:
+                                sid = ps.get(qn("w:val"))
+                        fmt = {**sdb.resolve(sid), **parse_ppr(ppr0)}
+                        for r in p0.findall(qn("w:r")):
+                            txt = "".join(t.text or "" for t in r.findall(qn("w:t")))
+                            if txt.strip():
+                                fmt.update({k: v for k, v in
+                                            parse_rpr(r.find(qn("w:rPr"))).items()
+                                            if v is not None})
+                                break
                         font = {k: fmt[k] for k in ("font_cn", "font_en", "size_pt")
                                 if fmt.get(k)}
                         header_cfg = {
                             "enabled": True,
-                            "content": "\n".join(p.text.strip() for p in paras),
+                            "content": "\n".join(
+                                "".join(t.text or "" for t in p.findall(".//" + qn("w:t"))).strip()
+                                for p in paras),
                             "align": align,
                         }
                         if font:
@@ -173,12 +192,12 @@ def _extract_header_footer(doc, sdb: StylesDB) -> dict:
             try:
                 if not sec.footer.is_linked_to_previous:
                     best = None
-                    for p in sec.footer.paragraphs:
-                        tpl = _story_paragraph_template(p._p)
+                    for p in sec.footer._element.iter(qn("w:p")):
+                        tpl = _story_paragraph_template(p)
                         if not tpl.strip():
                             continue
                         has_field = "{page}" in tpl or "{pages}" in tpl
-                        pos = parse_ppr(p._p).get("align") or "center"
+                        pos = parse_ppr(p).get("align") or "center"
                         if has_field:
                             best = (pos, tpl)
                             break
@@ -191,7 +210,23 @@ def _extract_header_footer(doc, sdb: StylesDB) -> dict:
                 footer_cfg = None
         if header_cfg is not None and footer_cfg is not None:
             break
-    if header_cfg is None and footer_cfg is None:
+    # 正文起编标志：参考文档在非首节写入 pgNumType start → 方案记为正文起编
+    start_at = None
+    start_idx = None
+    for i, s in enumerate(sections):
+        try:
+            pg = s._sectPr.find(qn("w:pgNumType"))
+        except Exception:
+            pg = None
+        if pg is not None and pg.get(qn("w:start")):
+            try:
+                start_at = int(pg.get(qn("w:start")))
+                start_idx = i
+            except (TypeError, ValueError):
+                pass
+            break
+    body_starts = start_idx is not None and start_idx > 0
+    if header_cfg is None and footer_cfg is None and not body_starts:
         return {}
     diff_first = False
     try:
@@ -208,9 +243,13 @@ def _extract_header_footer(doc, sdb: StylesDB) -> dict:
         header_cfg["different_first"] = True
     if diff_oe:
         header_cfg["different_odd_even"] = True
+    if footer_cfg is None:
+        footer_cfg = {"enabled": False}
+    elif body_starts:
+        footer_cfg.setdefault("page_number", {})["start_at"] = start_at
     return {"header": header_cfg,
-            "footer": footer_cfg or {"enabled": False},
-            "body_starts_new_section": False}
+            "footer": footer_cfg,
+            "body_starts_new_section": bool(body_starts)}
 
 
 def _extract_table_cell_style(doc, sdb: StylesDB) -> dict:
