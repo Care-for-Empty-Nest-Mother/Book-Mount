@@ -13,3 +13,4 @@ tests/
 # 用户方案不入库（隐私）——示例方案保留
 profiles/*
 !profiles/学位论文示例.fprof.json
+BookMountDebug*
