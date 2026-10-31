@@ -281,9 +281,16 @@ class ShushanPanel(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, APP_TITLE, f"分析失败：{e}")
             return
-        dlg = ClassifyDialog(analysis, Path(src).name, self)
-        if dlg.exec() != ClassifyDialog.Accepted:
+        from .workbench import WorkbenchDialog
+        dlg = WorkbenchDialog(analysis, profile, Path(src).name, work_path, self)
+        if dlg.exec() != WorkbenchDialog.Accepted:
             return
+        if dlg.style_edits:
+            import copy as _copy
+            profile = _copy.deepcopy(profile)
+            profile.setdefault("styles", {}).update(dlg.style_edits)
+            names = "、".join(dlg.style_edits)
+            self.log_line(f"[样式] 已按所选内容更新类型样式：{names}（仅本次整稿生效）")
         numbering_override = self._ask_numbering_mode(analysis, dlg.assignment)
         if numbering_override is None:
             return

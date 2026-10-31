@@ -9,6 +9,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QVBoxLayout)
 
+from .font_picker import fill_font_combo
+
+# 论文常用字体（保留为文档化常量；下拉实际由 font_picker 系统枚举填充）
 CN_FONTS = ["宋体", "黑体", "楷体", "仿宋", "仿宋_GB2312", "微软雅黑", "方正小标宋简体"]
 EN_FONTS = ["Times New Roman", "Arial", "Calibri", "Cambria", "SimSun"]
 ALIGN_ITEMS = [("left", "左对齐"), ("center", "居中"), ("right", "右对齐"),
@@ -36,12 +39,12 @@ class FormatEditDialog(QDialog):
         form = QFormLayout()
         self.font_cn = QComboBox()
         self.font_cn.setEditable(True)
-        self.font_cn.addItems(CN_FONTS)
+        fill_font_combo(self.font_cn)          # 系统字体枚举，论文常用置顶
         self.font_cn.setCurrentText(pre_fmt.get("font_cn") or "宋体")
         form.addRow("中文字体：", self.font_cn)
         self.font_en = QComboBox()
         self.font_en.setEditable(True)
-        self.font_en.addItems(EN_FONTS)
+        fill_font_combo(self.font_en)
         self.font_en.setCurrentText(pre_fmt.get("font_en") or "Times New Roman")
         form.addRow("西文字体：", self.font_en)
 
