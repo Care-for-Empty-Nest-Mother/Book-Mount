@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog,
                                QDoubleSpinBox, QDockWidget, QFileDialog, QFrame,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea,
+                               QPlainTextEdit, QPushButton, QScrollArea, QStatusBar, QTabBar,
                                QSplitter, QStackedWidget, QToolButton,
                                QVBoxLayout, QWidget, QTextBrowser)
 
@@ -55,16 +55,36 @@ from .word_icons import make_icon
 APP_TITLE = "书山 · 文献格式工坊"
 
 RIBBON_CSS = """
-QGroupBox { font-size: 11px; color: #666; border: 0; margin-top: 0; }
-QGroupBox::title { subcontrol-origin: margin; subcontrol-position: bottom left;
-                   left: 6px; }
-QToolButton { border: 1px solid transparent; border-radius: 3px;
-              padding: 2px 4px; font-size: 12px; }
-QToolButton:hover { background: #e7f5ff; border-color: #74c0fc; }
-QToolButton:checked { background: #d0ebff; border-color: #339af0; }
-QComboBox { font-size: 12px; }
-QDoubleSpinBox { font-size: 12px; }
-QPushButton { font-size: 12px; }
+#quickbar { background:#f3f2f1; border-bottom:1px solid #e1dfdd; }
+#quickbar QPushButton { border:1px solid transparent; background:transparent;
+  padding:3px 8px; font-size:12px; border-radius:3px; }
+#quickbar QPushButton:hover { background:#e1f1ff; border-color:#74c0fc; }
+#quickbar QComboBox { background:#fff; border:1px solid #c8c6c4; border-radius:3px;
+  padding:1px 4px; font-size:12px; }
+#tabbar { background:#ffffff; }
+#tabbar::tab { background:transparent; padding:5px 18px; font-size:13px; color:#444;
+  border:0; border-bottom:2px solid transparent; }
+#tabbar::tab:selected { color:#2b579a; font-weight:600;
+  border-bottom:2px solid #2b579a; }
+#ribbonPage { background:#ffffff; border-bottom:1px solid #e1dfdd; }
+#wgroup { border-left:1px solid #e1dfdd; border-right:1px solid #e1dfdd;
+  margin:0 3px; padding:2px 6px 0 6px; }
+QLabel.cap { color:#666; font-size:10px; background:transparent; }
+QToolButton { border:1px solid transparent; border-radius:3px; padding:3px 5px;
+  font-size:12px; background:transparent; }
+QToolButton:hover { background:#e7f5ff; border-color:#74c0fc; }
+QToolButton:checked { background:#d0ebff; border-color:#339af0; }
+QPushButton { border:1px solid #c8c6c4; border-radius:3px; padding:3px 10px;
+  background:#fff; font-size:12px; }
+QPushButton:hover { background:#f3f9ff; border-color:#74c0fc; }
+QComboBox { font-size:12px; background:#fff; border:1px solid #c8c6c4;
+  border-radius:3px; padding:1px 4px; }
+QDoubleSpinBox { font-size:12px; background:#fff; border:1px solid #c8c6c4;
+  border-radius:3px; }
+QLabel#docTitle { color:#1a3c34; font-weight:600; font-size:13px; }
+QStatusBar { background:#f3f2f1; color:#444; font-size:12px; }
+QStatusBar QPushButton { padding:2px 12px; background:#d3f9d8; border-color:#8ce99a; }
+QTextEdit { background:#8b8b8b; }
 """
 
 # 左栏样式卡的示例文字
@@ -144,7 +164,7 @@ class ShushanWorkbench(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1400, 820)
+        self.resize(1500, 860)
         try:
             from ..paths import ICON_FILE
             if ICON_FILE.exists():
@@ -210,32 +230,6 @@ class ShushanWorkbench(QMainWindow):
         self.view_stack.addWidget(self.view)              # index 0 连续流预览
         self.view_stack.addWidget(self._build_page_canvas())  # index 1 页面视图
 
-        central = QWidget()
-        cl = QVBoxLayout(central)
-        cl.setContentsMargins(6, 4, 6, 4)
-        cl.setSpacing(3)
-        cl.addWidget(self._build_topbar())
-        cl.addWidget(self.view_stack, stretch=1)
-
-        foot = QHBoxLayout()
-        self.citation_label = QLabel("")
-        self.citation_label.setWordWrap(True)
-        self.citation_label.setStyleSheet("color:#8a6d1a; font-size:11px;")
-        foot.addWidget(self.citation_label, stretch=1)
-        self.sel_label = QLabel("未加载文档")
-        foot.addWidget(self.sel_label)
-        self.btn_confirm = QPushButton("确认整稿")
-        self.btn_confirm.setToolTip("按当前对照结果整稿（原文件自动备份）；窗口不关闭，可继续调整")
-        self.btn_confirm.setStyleSheet(
-            "font-weight:600; padding:4px 14px; background:#d3f9d8;")
-        self.btn_confirm.clicked.connect(self._apply_now)
-        foot.addWidget(self.btn_confirm)
-        self.btn_reset = QPushButton("全部重置")
-        self.btn_reset.clicked.connect(self._on_reset)
-        foot.addWidget(self.btn_reset)
-        cl.addLayout(foot)
-        self.setCentralWidget(central)
-
         # ---- 可停靠面板（PPT 式可调布局；位置记忆见 _save_layout）----
         self.card_view = _ManuscriptView(self._on_card_click, self._on_card_hover,
                                          lambda b: None, self._card_context,
@@ -257,11 +251,6 @@ class ShushanWorkbench(QMainWindow):
         self.detail_dock.setObjectName("detailDock")
         self.detail_dock.setWidget(self._build_detail_panel())
         self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
-        self.adjust_dock = QDockWidget("格式调整", self)
-        self.adjust_dock.setObjectName("adjustDock")
-        self.adjust_dock.setWidget(self._build_adjust_panel())
-        self.addDockWidget(Qt.RightDockWidgetArea, self.adjust_dock)
-        self.splitDockWidget(self.adjust_dock, self.detail_dock, Qt.Vertical)
 
         self.log_dock = QDockWidget("日志", self)
         self.log_dock.setObjectName("logDock")
@@ -269,12 +258,42 @@ class ShushanWorkbench(QMainWindow):
         self.log_dock.setWidget(self.log)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
 
+        central = QWidget()
+        cl = QVBoxLayout(central)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self._build_quick_bar())
+        cl.addWidget(self._build_tabs())
+        cl.addWidget(self.view_stack, stretch=1)
+        self.setCentralWidget(central)
+        # Word 式状态栏
+        self.citation_label = QLabel("")
+        self.citation_label.setWordWrap(True)
+        self.citation_label.setStyleSheet("color:#8a6d1a; font-size:11px;")
+        self.sel_label = QLabel("未加载文档")
+        self.btn_confirm = QPushButton("确认整稿")
+        self.btn_confirm.setToolTip("按当前对照结果整稿（原文件自动备份）；窗口不关闭，可继续调整")
+        self.btn_confirm.setStyleSheet("font-weight:600; background:#d3f9d8;")
+        self.btn_confirm.clicked.connect(self._apply_now)
+        self.btn_reset = QPushButton("全部重置")
+        self.btn_reset.clicked.connect(self._on_reset)
+        sb = self.statusBar()
+        sb.addWidget(self.citation_label, 1)
+        sb.addWidget(self.sel_label)
+        sb.addPermanentWidget(self.btn_confirm)
+        sb.addPermanentWidget(self.btn_reset)
+        # 灰底 + 白色页纸（连续流视图）
+        self.view.document().setDocumentMargin(14)
+        _ff = self.view.document().rootFrame().frameFormat()
+        _ff.setBackground(QColor("white"))
+        self.view.document().rootFrame().setFrameFormat(_ff)
+
         self._build_view_menu()
         self._resize_default_docks()
 
     def _build_view_menu(self):
         menu = self.menuBar().addMenu("视图")
-        for dock in (self.style_dock, self.region_dock, self.adjust_dock,
+        for dock in (self.style_dock, self.region_dock,
                      self.detail_dock, self.log_dock):
             menu.addAction(dock.toggleViewAction())
         menu.addSeparator()
@@ -283,19 +302,18 @@ class ShushanWorkbench(QMainWindow):
 
     def _resize_default_docks(self):
         self.resizeDocks([self.style_dock, self.region_dock], [330], Qt.Horizontal)
-        self.resizeDocks([self.adjust_dock], [270], Qt.Horizontal)
-        self.resizeDocks([self.detail_dock], [240], Qt.Vertical)
-        self.resizeDocks([self.log_dock], [110], Qt.Vertical)
+        self.resizeDocks([self.detail_dock], [280], Qt.Horizontal)
+        self.resizeDocks([self.log_dock], [90], Qt.Vertical)
 
     def _save_layout(self):
         try:
-            self._settings.setValue("dock_state_v2", self.saveState())
+            self._settings.setValue("dock_state_v3", self.saveState())
             self._settings.setValue("main_geometry", self.saveGeometry())
         except Exception:
             pass
 
     def _restore_or_default_layout(self):
-        state = self._settings.value("dock_state_v2")
+        state = self._settings.value("dock_state_v3")
         if state is not None:
             try:
                 self.restoreState(state)
@@ -308,7 +326,7 @@ class ShushanWorkbench(QMainWindow):
         self._resize_default_docks()
 
     def _reset_layout(self):
-        for d in (self.style_dock, self.region_dock, self.adjust_dock,
+        for d in (self.style_dock, self.region_dock,
                   self.detail_dock, self.log_dock):
             d.setFloating(False)
             self.removeDockWidget(d)
@@ -316,11 +334,9 @@ class ShushanWorkbench(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.region_dock)
         self.tabifyDockWidget(self.style_dock, self.region_dock)
         self.style_dock.raise_()
-        self.addDockWidget(Qt.RightDockWidgetArea, self.adjust_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
-        self.splitDockWidget(self.adjust_dock, self.detail_dock, Qt.Vertical)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-        for d in (self.style_dock, self.region_dock, self.adjust_dock,
+        for d in (self.style_dock, self.region_dock,
                   self.detail_dock, self.log_dock):
             d.show()
         self._resize_default_docks()
@@ -426,33 +442,39 @@ class ShushanWorkbench(QMainWindow):
                 f'<p><b>{len(scope)} 段</b> · 多数派格式</p>{items}'
                 f'<p style="color:#666">改动将同时应用到选中的全部段落</p>')
 
-    def _build_topbar(self) -> QWidget:
+    def _build_quick_bar(self) -> QWidget:
+        """快速访问栏（Word 风）：方案下拉 + 高频动作。"""
         bar = QWidget()
+        bar.setObjectName("quickbar")
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(5)
-        lay.addWidget(QLabel("方案:"))
+        lay.setContentsMargins(6, 3, 6, 3)
+        lay.setSpacing(4)
+        title = QLabel("书山 · 文献格式工坊")
+        title.setObjectName("docTitle")
+        lay.addWidget(title)
+        sep = QFrame(); sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color:#d0d0d0")
+        lay.addWidget(sep)
         self.profile_combo = QComboBox()
-        self.profile_combo.setMinimumWidth(210)
+        self.profile_combo.setMinimumWidth(200)
         self.profile_combo.setToolTip("格式方案库（profiles/）")
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_combo)
-        lay.addWidget(self.profile_combo, stretch=2)
+        lay.addWidget(self.profile_combo, stretch=1)
         for text, tip, slot in (
-                ("提取格式…", "从一篇排版规范的文献提取格式方案（弹批注视图）",
+                ("提取格式", "从一篇排版规范的文献提取格式方案（弹批注视图）",
                  self.on_extract),
-                ("导入…", "导入 .fprof.json 方案文件", self.on_import),
-                ("渲染模板…", "方案 → .dotx Word 模板", self.on_render),
+                ("导入", "导入 .fprof.json 方案文件", self.on_import),
+                ("渲染模板", "方案 → .dotx Word 模板", self.on_render),
                 ("删除", "删除选中的方案（不可恢复）", self.on_delete_profile)):
             b = QPushButton(text)
             b.setToolTip(tip)
             b.clicked.connect(slot)
             lay.addWidget(b)
-        sep = QFrame(); sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color:#d0d0d0")
-        lay.addWidget(sep)
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.VLine)
+        sep2.setStyleSheet("color:#d0d0d0")
+        lay.addWidget(sep2)
         self.btn_pick_doc = QPushButton("整稿应用…")
         self.btn_pick_doc.setToolTip("选择目标文档并载入双栏预览")
-        self.btn_pick_doc.setStyleSheet("font-weight:600; background:#d0ebff;")
+        self.btn_pick_doc.setStyleSheet("font-weight:600; background:#dbe8ff;")
         self.btn_pick_doc.clicked.connect(self._pick_and_load_document)
         lay.addWidget(self.btn_pick_doc)
         self.btn_page_view = QPushButton("页面视图")
@@ -463,7 +485,7 @@ class ShushanWorkbench(QMainWindow):
         self.btn_page_view.setEnabled(False)
         self.btn_page_view.clicked.connect(self._toggle_page_view)
         lay.addWidget(self.btn_page_view)
-        self.btn_refresh_pages = QPushButton("刷新页面视图")
+        self.btn_refresh_pages = QPushButton("刷新")
         self.btn_refresh_pages.setToolTip("按当前调整重新渲染页面视图（手动刷新）")
         self.btn_refresh_pages.setEnabled(False)
         self.btn_refresh_pages.clicked.connect(self._refresh_page_view)
@@ -474,58 +496,72 @@ class ShushanWorkbench(QMainWindow):
             "你正在使用的、有窗口的 Word 不受影响")
         self.btn_cleanup_word.clicked.connect(self.on_cleanup_word)
         lay.addWidget(self.btn_cleanup_word)
-        lay.addStretch(1)
         return bar
 
-    def _build_adjust_panel(self) -> QWidget:
-        """右侧竖排格式调整面板（旧顶部功能区迁入；控件/快捷键/处理函数不变）。"""
-        panel = QWidget()
-        panel.setStyleSheet(RIBBON_CSS)
-        lay = QVBoxLayout(panel)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(5)
+    def _build_tabs(self) -> QWidget:
+        """Word 式选项卡功能区：开始 / 方案 / 视图。"""
+        from PySide6.QtWidgets import QTabBar
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.tabbar = QTabBar()
+        self.tabbar.setObjectName("tabbar")
+        self.tabbar.setDrawBase(False)
+        self.tabbar.setExpanding(False)
+        self.tabbar.addTab("开始")
+        self.tabbar.addTab("方案")
+        self.tabbar.addTab("视图")
+        self.tabbar.setCurrentIndex(0)
+        v.addWidget(self.tabbar)
+        self.ribbon_stack = QStackedWidget()
+        self.ribbon_stack.addWidget(self._page_start())   # index 0
+        self.ribbon_stack.addWidget(self._page_plan())    # index 1
+        self.ribbon_stack.addWidget(self._page_view_tab())  # index 2
+        v.addWidget(self.ribbon_stack)
+        self.tabbar.currentChanged.connect(self.ribbon_stack.setCurrentIndex)
+        return wrap
 
-        # ---- 类型与样式 ----
-        g_style = QGroupBox("类型与样式")
-        sl = QVBoxLayout(g_style)
-        sl.setContentsMargins(6, 2, 6, 6)
-        sl.setSpacing(3)
-        self.type_combo = QComboBox()
-        for tid, label in TYPE_ITEMS:
-            self.type_combo.addItem(label, tid)
-        self.type_combo.setToolTip("选中段的类型（可改判）")
-        sl.addWidget(self.type_combo)
-        row_s = QHBoxLayout()
-        row_s.setSpacing(4)
-        btn_reassign = QPushButton("改判")
-        btn_reassign.setToolTip("把选中段落改判为所选类型 (Ctrl+Shift+N=改判为正文)")
-        btn_reassign.clicked.connect(self._on_reassign)
-        row_s.addWidget(btn_reassign)
-        btn_upd = QPushButton("更新到类型样式")
-        btn_upd.setToolTip("把所选段落的格式提升为该类型的样式\n"
-                           "（Word「更新样式以匹配所选内容」；仅本次整稿生效）")
-        btn_upd.clicked.connect(self._update_style)
-        row_s.addWidget(btn_upd)
-        sl.addLayout(row_s)
-        lay.addWidget(g_style)
+    def _wgroup(self, caption) -> tuple:
+        """Word 功能区分组：控件区 + 底部灰色组名，左右细分隔线。"""
+        box = QFrame()
+        box.setObjectName("wgroup")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(6, 2, 6, 1)
+        v.setSpacing(3)
+        cap = QLabel(caption)
+        cap.setProperty("class", "cap")
+        cap.setAlignment(Qt.AlignCenter)
+        return box, v, cap
 
-        # ---- 字体 ----
-        g_font = QGroupBox("字体")
-        fl = QVBoxLayout(g_font)
-        fl.setContentsMargins(6, 2, 6, 6)
-        fl.setSpacing(3)
+    def _finish_group(self, box, v, cap, host):
+        v.addWidget(cap)
+        host.addWidget(box)
+
+    def _page_start(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("ribbonPage")
+        h = QHBoxLayout(page)
+        h.setContentsMargins(6, 2, 6, 0)
+        h.setSpacing(0)
+
+        # 字体组
+        g1, v1, c1 = self._wgroup("字体")
+        r1 = QHBoxLayout(); r1.setSpacing(3)
         self.font_combo = QComboBox()
+        self.font_combo.setMinimumWidth(170)
         self.font_combo.setToolTip("字体（同设中/西文，与 Word 一致）；"
                                    "中西文分别设置请右键→修改格式")
         fill_font_combo(self.font_combo)
         self.font_combo.currentTextChanged.connect(self._on_font_changed)
-        fl.addWidget(self.font_combo)
-        row_f = QHBoxLayout()
-        row_f.setSpacing(3)
+        r1.addWidget(self.font_combo, stretch=3)
         self.size_combo = QComboBox()
+        self.size_combo.setFixedWidth(78)
         fill_size_combo(self.size_combo)
         self.size_combo.currentIndexChanged.connect(self._on_size_index)
-        row_f.addWidget(self.size_combo, stretch=2)
+        r1.addWidget(self.size_combo, stretch=1)
+        v1.addLayout(r1)
+        r2 = QHBoxLayout(); r2.setSpacing(3)
         self.btn_bold = self._glyph_button("B", True, False, "加粗 (Ctrl+B)",
                                            self._toggle_bold)
         self.btn_italic = self._glyph_button("I", False, True, "斜体 (Ctrl+I)",
@@ -535,19 +571,16 @@ class ShushanWorkbench(QMainWindow):
         self.btn_color.setIcon(make_icon("font_color", self.color))
         self.btn_color.setToolTip("字体颜色")
         self.btn_color.clicked.connect(self._pick_color)
-        row_f.addWidget(self.btn_bold)
-        row_f.addWidget(self.btn_italic)
-        row_f.addWidget(self.btn_color)
-        fl.addLayout(row_f)
-        lay.addWidget(g_font)
+        r2.addWidget(self.btn_bold)
+        r2.addWidget(self.btn_italic)
+        r2.addWidget(self.btn_color)
+        r2.addStretch(1)
+        v1.addLayout(r2)
+        self._finish_group(g1, v1, c1, h)
 
-        # ---- 段落 ----
-        g_para = QGroupBox("段落")
-        pl = QVBoxLayout(g_para)
-        pl.setContentsMargins(6, 2, 6, 6)
-        pl.setSpacing(3)
-        row_a = QHBoxLayout()
-        row_a.setSpacing(3)
+        # 段落组
+        g2, v2, c2 = self._wgroup("段落")
+        r3 = QHBoxLayout(); r3.setSpacing(3)
         self.align_btns = {}
         for kind, tip in (("left", "左对齐 (Ctrl+L)"), ("center", "居中 (Ctrl+E)"),
                           ("right", "右对齐 (Ctrl+R)"), ("justify", "两端对齐 (Ctrl+J)")):
@@ -557,16 +590,29 @@ class ShushanWorkbench(QMainWindow):
             b.setCheckable(True)
             b.clicked.connect(lambda _=False, k=kind: self._set_align(k))
             self.align_btns[kind] = b
-            row_a.addWidget(b)
-        pl.addLayout(row_a)
+            r3.addWidget(b)
+        s1 = QFrame(); s1.setFrameShape(QFrame.VLine)
+        s1.setStyleSheet("color:#e1dfdd")
+        r3.addWidget(s1)
+        self.btn_indent_dec = QToolButton()
+        self.btn_indent_dec.setIcon(make_icon("indent_dec"))
+        self.btn_indent_dec.setToolTip("减少首行缩进 0.5 字符 (Ctrl+Shift+M)")
+        self.btn_indent_dec.clicked.connect(lambda: self._indent_step(-0.5))
+        self.btn_indent_inc = QToolButton()
+        self.btn_indent_inc.setIcon(make_icon("indent_inc"))
+        self.btn_indent_inc.setToolTip("增加首行缩进 0.5 字符 (Ctrl+M)")
+        self.btn_indent_inc.clicked.connect(lambda: self._indent_step(0.5))
+        r3.addWidget(self.btn_indent_dec)
+        r3.addWidget(self.btn_indent_inc)
+        r3.addStretch(1)
+        v2.addLayout(r3)
+        r4 = QHBoxLayout(); r4.setSpacing(3)
         self.line_combo = QComboBox()
         self.line_combo.setToolTip("行距 (Ctrl+1 / Ctrl+5 / Ctrl+2)")
         for mode, v in LINE_ITEMS:
             self.line_combo.addItem(f"{v:g} 倍", (mode, v))
         self.line_combo.currentIndexChanged.connect(self._on_line_index)
-        pl.addWidget(self.line_combo)
-        row_sp = QHBoxLayout()
-        row_sp.setSpacing(3)
+        r4.addWidget(self.line_combo, stretch=1)
         self.before_spin = QDoubleSpinBox()
         self.before_spin.setRange(0, 200)
         self.before_spin.setDecimals(1)
@@ -583,48 +629,99 @@ class ShushanWorkbench(QMainWindow):
         self.after_spin.setSuffix("磅")
         self.after_spin.setToolTip("段后间距（磅）")
         self.after_spin.valueChanged.connect(self._on_after_changed)
-        row_sp.addWidget(self.before_spin)
-        row_sp.addWidget(self.after_spin)
-        pl.addLayout(row_sp)
-        row_ind = QHBoxLayout()
-        row_ind.setSpacing(3)
-        self.btn_indent_inc = QToolButton()
-        self.btn_indent_inc.setIcon(make_icon("indent_inc"))
-        self.btn_indent_inc.setToolTip("增加首行缩进 0.5 字符 (Ctrl+M)")
-        self.btn_indent_inc.clicked.connect(lambda: self._indent_step(0.5))
-        self.btn_indent_dec = QToolButton()
-        self.btn_indent_dec.setIcon(make_icon("indent_dec"))
-        self.btn_indent_dec.setToolTip("减少首行缩进 0.5 字符 (Ctrl+Shift+M)")
-        self.btn_indent_dec.clicked.connect(lambda: self._indent_step(-0.5))
-        row_ind.addWidget(self.btn_indent_dec)
-        row_ind.addWidget(self.btn_indent_inc)
-        lab_ind = QLabel("首行缩进 ±0.5 字符")
-        lab_ind.setStyleSheet("color:#666; font-size:11px;")
-        row_ind.addWidget(lab_ind, stretch=1)
-        pl.addLayout(row_ind)
-        lay.addWidget(g_para)
+        r4.addWidget(self.before_spin)
+        r4.addWidget(self.after_spin)
+        v2.addLayout(r4)
+        self._finish_group(g2, v2, c2, h)
 
-        # ---- 操作 ----
-        g_ops = QGroupBox("操作")
-        ol = QHBoxLayout(g_ops)
-        ol.setContentsMargins(6, 2, 6, 6)
-        ol.setSpacing(3)
+        # 样式组
+        g3, v3, c3 = self._wgroup("样式")
+        self.type_combo = QComboBox()
+        for tid, label in TYPE_ITEMS:
+            self.type_combo.addItem(label, tid)
+        self.type_combo.setToolTip("选中段的类型（可改判）")
+        v3.addWidget(self.type_combo)
+        r5 = QHBoxLayout(); r5.setSpacing(3)
+        btn_reassign = QPushButton("改判")
+        btn_reassign.setToolTip("把选中段落改判为所选类型 (Ctrl+Shift+N=改判为正文)")
+        btn_reassign.clicked.connect(self._on_reassign)
+        btn_upd = QPushButton("更新到类型样式")
+        btn_upd.setToolTip("把所选段落的格式提升为该类型的样式\n"
+                           "（Word「更新样式以匹配所选内容」；仅本次整稿生效）")
+        btn_upd.clicked.connect(self._update_style)
+        r5.addWidget(btn_reassign)
+        r5.addWidget(btn_upd)
+        v3.addLayout(r5)
+        self._finish_group(g3, v3, c3, h)
+
+        # 编辑组
+        g4, v4, c4 = self._wgroup("编辑")
+        r6 = QHBoxLayout(); r6.setSpacing(3)
         self.btn_clear = QToolButton()
         self.btn_clear.setIcon(make_icon("clear_format"))
         self.btn_clear.setToolTip("清除本段的格式修改 (Ctrl+Q)")
         self.btn_clear.clicked.connect(self._clear_overrides)
-        ol.addWidget(self.btn_clear)
+        r6.addWidget(self.btn_clear)
         self.btn_undo = QPushButton("↺ 撤销")
         self.btn_undo.setToolTip("撤销 (Ctrl+Z)")
         self.btn_undo.clicked.connect(self._undo)
-        ol.addWidget(self.btn_undo, stretch=1)
+        r6.addWidget(self.btn_undo)
         self.btn_redo = QPushButton("↻ 重做")
         self.btn_redo.setToolTip("重做 (Ctrl+Y)")
         self.btn_redo.clicked.connect(self._redo)
-        ol.addWidget(self.btn_redo, stretch=1)
-        lay.addWidget(g_ops)
-        lay.addStretch(1)
-        return panel
+        r6.addWidget(self.btn_redo)
+        r6.addStretch(1)
+        v4.addLayout(r6)
+        self._finish_group(g4, v4, c4, h)
+
+        h.addStretch(1)
+        return page
+
+    def _page_plan(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("ribbonPage")
+        h = QHBoxLayout(page)
+        h.setContentsMargins(6, 2, 6, 0)
+        for text, tip, slot in (
+                ("① 提取格式", "从一篇排版规范的文献提取格式方案（弹批注视图）",
+                 self.on_extract),
+                ("② 导入方案", "导入 .fprof.json 方案文件", self.on_import),
+                ("③ 渲染 .dotx 模板", "方案 → Word 模板", self.on_render),
+                ("删除选中方案", "删除选中的方案（不可恢复）", self.on_delete_profile)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            h.addWidget(b)
+        tip = QLabel("方案下拉在上方快速访问栏；方案库目录 profiles/")
+        tip.setStyleSheet("color:#666; font-size:11px;")
+        h.addWidget(tip)
+        h.addStretch(1)
+        return page
+
+    def _page_view_tab(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("ribbonPage")
+        h = QHBoxLayout(page)
+        h.setContentsMargins(6, 2, 6, 0)
+        h.addWidget(QLabel("显示 / 隐藏面板："))
+        for dock in (self.style_dock, self.region_dock, self.detail_dock,
+                     self.log_dock):
+            b = QPushButton(dock.windowTitle())
+            b.setCheckable(True)
+            b.setChecked(not dock.isHidden())
+            act = dock.toggleViewAction()
+            act.toggled.connect(lambda on, btn=b: btn.setChecked(on))
+            b.toggled.connect(lambda on, a=act: a.setChecked(on))
+            h.addWidget(b)
+        b_reset = QPushButton("重置布局")
+        b_reset.setToolTip("恢复默认停靠位置")
+        b_reset.clicked.connect(self._reset_layout)
+        h.addWidget(b_reset)
+        tip = QLabel("面板可直接拖动标题栏换位/浮动/调宽，布局自动记忆")
+        tip.setStyleSheet("color:#666; font-size:11px;")
+        h.addWidget(tip)
+        h.addStretch(1)
+        return page
 
     def _glyph_button(self, text, bold, italic, tip, slot) -> QToolButton:
         b = QToolButton()
