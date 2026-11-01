@@ -21,15 +21,17 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (QCoreApplication, QEvent, QSettings, Qt, QThread,
+                            QTimer, QUrl, Signal)
 from PySide6.QtGui import (QColor, QFont, QIcon, QKeySequence, QPixmap,
                            QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog,
-                               QDoubleSpinBox, QFileDialog, QFrame, QGroupBox,
-                               QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+                               QDoubleSpinBox, QDockWidget, QFileDialog, QFrame,
+                               QGroupBox, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QScrollArea,
                                QSplitter, QStackedWidget, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QTextBrowser)
 
 from ..analyzer.docx_analyzer import AnalysisResult, analyze_document
 from ..convert import ensure_docx
@@ -174,7 +176,6 @@ class ShushanWorkbench(QMainWindow):
         self._b2p: dict = {}
         self._card_tid: list = []
         self._card_b2t: dict = {}
-        self._card_region_jump: dict = {}
         # 区域标记（M2.6）
         self.regions: list = []
         self._base_suggestion: dict = {}
@@ -191,25 +192,16 @@ class ShushanWorkbench(QMainWindow):
 
         self._build_ui()
         self._bind_shortcuts()
+        # 可停靠布局记忆：手动拖过的位置下次启动自动还原
+        QCoreApplication.setOrganizationName("CareForEmptyNestMother")
+        QCoreApplication.setApplicationName("书山")
+        self._settings = QSettings("CareForEmptyNestMother", "书山工作台")
+        self._restore_or_default_layout()
         self.refresh_profiles()
         self._show_empty_state()
 
     # ================= UI 构建 =================
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setSpacing(3)
-        root.setContentsMargins(6, 4, 6, 4)
-
-        root.addWidget(self._build_topbar())
-        root.addWidget(self._build_ribbon())
-
-        split = QSplitter(Qt.Horizontal)
-        self.card_view = _ManuscriptView(self._on_card_click, self._on_card_hover,
-                                         lambda b: None, self._card_context,
-                                         lambda b, pos: False)
-        self.card_view.setFont(QFont("Microsoft YaHei", 10))
         self.view = _ManuscriptView(self._on_click, self._on_hover,
                                     self._on_alt_click, self._context_menu,
                                     self._on_double)
@@ -217,11 +209,14 @@ class ShushanWorkbench(QMainWindow):
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(self.view)              # index 0 连续流预览
         self.view_stack.addWidget(self._build_page_canvas())  # index 1 页面视图
-        split.addWidget(self.card_view)
-        split.addWidget(self.view_stack)
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 3)
-        root.addWidget(split, stretch=1)
+
+        central = QWidget()
+        cl = QVBoxLayout(central)
+        cl.setContentsMargins(6, 4, 6, 4)
+        cl.setSpacing(3)
+        cl.addWidget(self._build_topbar())
+        cl.addWidget(self._build_ribbon())
+        cl.addWidget(self.view_stack, stretch=1)
 
         foot = QHBoxLayout()
         self.citation_label = QLabel("")
@@ -239,19 +234,190 @@ class ShushanWorkbench(QMainWindow):
         self.btn_reset = QPushButton("全部重置")
         self.btn_reset.clicked.connect(self._on_reset)
         foot.addWidget(self.btn_reset)
-        root.addLayout(foot)
+        cl.addLayout(foot)
+        self.setCentralWidget(central)
 
-        # 可折叠日志
-        log_row = QHBoxLayout()
-        self.btn_log = QPushButton("日志 ▾")
-        self.btn_log.setFlat(True)
-        self.btn_log.setStyleSheet("color:#495057; font-size:11px;")
-        self.btn_log.clicked.connect(self._toggle_log)
-        log_row.addWidget(self.btn_log)
-        log_row.addStretch(1)
-        root.addLayout(log_row)
+        # ---- 可停靠面板（PPT 式可调布局；位置记忆见 _save_layout）----
+        self.card_view = _ManuscriptView(self._on_card_click, self._on_card_hover,
+                                         lambda b: None, self._card_context,
+                                         lambda b, pos: False)
+        self.card_view.setFont(QFont("Microsoft YaHei", 10))
+        self.style_dock = QDockWidget("样式库（模板）", self)
+        self.style_dock.setObjectName("styleDock")
+        self.style_dock.setWidget(self.card_view)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.style_dock)
+
+        self.region_dock = QDockWidget("区域", self)
+        self.region_dock.setObjectName("regionDock")
+        self.region_dock.setWidget(self._build_region_panel())
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.region_dock)
+        self.tabifyDockWidget(self.style_dock, self.region_dock)
+        self.style_dock.raise_()
+
+        self.detail_dock = QDockWidget("格式详情", self)
+        self.detail_dock.setObjectName("detailDock")
+        self.detail_dock.setWidget(self._build_detail_panel())
+        self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
+
+        self.log_dock = QDockWidget("日志", self)
+        self.log_dock.setObjectName("logDock")
         self.log = _LogView()
-        root.addWidget(self.log)
+        self.log_dock.setWidget(self.log)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+
+        self._build_view_menu()
+        self._resize_default_docks()
+
+    def _build_view_menu(self):
+        menu = self.menuBar().addMenu("视图")
+        for dock in (self.style_dock, self.region_dock,
+                     self.detail_dock, self.log_dock):
+            menu.addAction(dock.toggleViewAction())
+        menu.addSeparator()
+        act = menu.addAction("重置布局")
+        act.triggered.connect(self._reset_layout)
+
+    def _resize_default_docks(self):
+        self.resizeDocks([self.style_dock, self.region_dock], [330], Qt.Horizontal)
+        self.resizeDocks([self.detail_dock], [280], Qt.Horizontal)
+        self.resizeDocks([self.log_dock], [110], Qt.Vertical)
+
+    def _save_layout(self):
+        try:
+            self._settings.setValue("dock_state", self.saveState())
+            self._settings.setValue("main_geometry", self.saveGeometry())
+        except Exception:
+            pass
+
+    def _restore_or_default_layout(self):
+        state = self._settings.value("dock_state")
+        if state is not None:
+            try:
+                self.restoreState(state)
+                geo = self._settings.value("main_geometry")
+                if geo is not None:
+                    self.restoreGeometry(geo)
+                return
+            except Exception:
+                pass
+        self._resize_default_docks()
+
+    def _reset_layout(self):
+        for d in (self.style_dock, self.region_dock,
+                  self.detail_dock, self.log_dock):
+            d.setFloating(False)
+            self.removeDockWidget(d)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.style_dock)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.region_dock)
+        self.tabifyDockWidget(self.style_dock, self.region_dock)
+        self.style_dock.raise_()
+        self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        for d in (self.style_dock, self.region_dock,
+                  self.detail_dock, self.log_dock):
+            d.show()
+        self._resize_default_docks()
+        self._save_layout()
+        self.log_line("[视图] 布局已重置为默认")
+
+    # ---- 区域面板（停靠） ----
+    def _build_region_panel(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(4)
+        hint = QLabel("点选/框选段落 → 选类型 → 标记；\n区间内表格图片随区间归属")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#666; font-size:11px;")
+        v.addWidget(hint)
+        self.region_combo = QComboBox()
+        for tid, label in MARKABLE_TYPES:
+            self.region_combo.addItem(label, tid)
+        v.addWidget(self.region_combo)
+        row = QHBoxLayout()
+        self.btn_region_mark = QPushButton("标记选中区域")
+        self.btn_region_mark.setToolTip("把选中段落范围标记为所选区域，识别规则按区域重跑")
+        self.btn_region_mark.clicked.connect(self._mark_region)
+        self.btn_region_clear = QPushButton("清除标记")
+        self.btn_region_clear.setToolTip("清除与选中范围重叠的区域标记（建议还原到分析基线）")
+        self.btn_region_clear.clicked.connect(self._clear_region_marks)
+        row.addWidget(self.btn_region_mark, stretch=1)
+        row.addWidget(self.btn_region_clear, stretch=1)
+        v.addLayout(row)
+        v.addWidget(QLabel("已标记区域（点击定位）："))
+        self.region_list = QListWidget()
+        self.region_list.itemClicked.connect(self._on_region_item)
+        v.addWidget(self.region_list, stretch=1)
+        return w
+
+    def _refresh_region_list(self):
+        self.region_list.clear()
+        for r in self.regions:
+            color = REGION_COLORS.get(r.type, "#868e96")
+            label = REGION_LABELS.get(r.type, r.type)
+            item = QListWidgetItem(f"【{label}】  P{r.start}–P{r.end}")
+            item.setData(Qt.UserRole, r.start)
+            item.setForeground(QColor("#495057") if r.type == "auto"
+                               else QColor(color))
+            self.region_list.addItem(item)
+
+    def _on_region_item(self, item):
+        start = item.data(Qt.UserRole)
+        if start is None or self.analysis is None:
+            return
+        self.selected = {start}
+        self._anchor = start
+        block = self.view.document().findBlockByNumber(self._p2b.get(start, -1))
+        if block.isValid():
+            self._scroll_block_to_middle(block)
+        self._after_selection_change()
+
+    # ---- 格式详情面板（停靠） ----
+    def _build_detail_panel(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(4, 4, 4, 4)
+        self.detail_view = QTextBrowser()
+        self.detail_view.setOpenExternalLinks(False)
+        self.detail_view.setStyleSheet("font-size:11px;")
+        v.addWidget(self.detail_view)
+        self._update_detail_panel()
+        return w
+
+    def _update_detail_panel(self):
+        if self.analysis is None or not self.selected:
+            self.detail_view.setHtml('<p style="color:#868e96">点选右侧段落，'
+                                     "这里常驻显示它的格式明细。</p>")
+            return
+        scope = sorted(self._scope())
+        if not scope:
+            self.detail_view.setHtml('<p style="color:#868e96">选中段无可归类格式'
+                                     "（空段/未载文档）。</p>")
+            return
+        if len(scope) == 1:
+            i = scope[0]
+            p = self.paras[i]
+            tid = self.assignment.get(i, p.suggestion)
+            changed = "" if tid == p.suggestion else "（已改判）"
+            if i in self.fmt_overrides:
+                changed += " ✍已修改格式"
+            items = "".join(
+                f'<div style="margin:1px 0">{_html.escape(x)}</div>'
+                for x in fmt_detail(self._fmt_of(i)).split(" ｜ ")
+                if x)
+            self.detail_view.setHtml(
+                f'<p><b>P{i}</b> · {label_of(tid)}{changed}'
+                f'<span style="color:#868e96">（建议 {label_of(p.suggestion)}）</span></p>'
+                f'{items}'
+                f'<p style="color:#666">依据：{_html.escape(p.reason)}</p>')
+        else:
+            fmt = self._majority_fmt()
+            items = "".join(
+                f'<div style="margin:1px 0">{_html.escape(x)}</div>'
+                for x in fmt_detail(fmt).split(" ｜ ") if x)
+            self.detail_view.setHtml(
+                f'<p><b>{len(scope)} 段</b> · 多数派格式</p>{items}'
+                f'<p style="color:#666">改动将同时应用到选中的全部段落</p>')
 
     def _build_topbar(self) -> QWidget:
         bar = QWidget()
@@ -419,26 +585,6 @@ class ShushanWorkbench(QMainWindow):
         sl.addWidget(btn_upd)
         lay.addWidget(g_style)
 
-        # ---- 区域组（M2.6）----
-        g_region = QGroupBox("区域")
-        rl = QHBoxLayout(g_region)
-        rl.setContentsMargins(4, 2, 4, 8)
-        self.region_combo = QComboBox()
-        for tid, label in MARKABLE_TYPES:
-            self.region_combo.addItem(label, tid)
-        self.region_combo.setToolTip("先点选/框选段落，再标记为所选区域类型；"
-                                     "区间内的表格与图片随区间归属")
-        rl.addWidget(self.region_combo, stretch=1)
-        self.btn_region_mark = QPushButton("标记选中区域")
-        self.btn_region_mark.setToolTip("把选中段落范围标记为所选区域，识别规则按区域重跑")
-        self.btn_region_mark.clicked.connect(self._mark_region)
-        rl.addWidget(self.btn_region_mark)
-        self.btn_region_clear = QPushButton("清除标记")
-        self.btn_region_clear.setToolTip("清除与选中范围重叠的区域标记（建议还原到分析基线）")
-        self.btn_region_clear.clicked.connect(self._clear_region_marks)
-        rl.addWidget(self.btn_region_clear)
-        lay.addWidget(g_region)
-
         # ---- 通用组 ----
         g_ops = QGroupBox("")
         ol = QHBoxLayout(g_ops)
@@ -504,7 +650,7 @@ class ShushanWorkbench(QMainWindow):
         self.log.append_line(text)
 
     def _toggle_log(self):
-        self.log.toggle()
+        pass
 
     # ================= 方案库（顶栏动作，自 panel.py 迁移） =================
     def refresh_profiles(self):
@@ -728,6 +874,8 @@ class ShushanWorkbench(QMainWindow):
         self._page_images = []
         self._pages_dirty = True
         self._populate_pages()
+        self._refresh_region_list()
+        self._update_detail_panel()
         if self._page_mode:
             QTimer.singleShot(0, self._refresh_page_view)
         self._rebuild_cards()
@@ -752,6 +900,8 @@ class ShushanWorkbench(QMainWindow):
             self._page_mode = False
         self._page_images = []
         self.view_stack.setCurrentIndex(0)
+        self._refresh_region_list()
+        self._update_detail_panel()
         self.sel_label.setText("未加载文档")
         self.view.setHtml(EMPTY_GUIDE.replace("its", "它的"))
         self._p2b, self._b2p = {}, {}
@@ -864,26 +1014,10 @@ class ShushanWorkbench(QMainWindow):
 
     def _rebuild_cards(self):
         frags = []
-        actions = []                       # ("type", tid) / ("region", start) / ("none", None)
         self._card_tid = []
-        # 区域总览卡（点击定位区域首段）
-        if self.regions:
-            frags.append('<p style="font-size:9pt; color:#1a3c34; margin:2pt 0">'
-                         "<b>区域</b>（点击定位）</p>")
-            actions.append(("none", None))
-            for r in self.regions:
-                color = REGION_COLORS.get(r.type, "#868e96")
-                label = REGION_LABELS.get(r.type, r.type)
-                frags.append(
-                    f'<p style="font-size:9pt; margin:1pt 0 1pt 4pt">'
-                    f'<span style="background-color:{color}; color:#fff; '
-                    f'font-size:8pt">&nbsp;{label}&nbsp;</span>'
-                    f' <span style="color:#495057">P{r.start}–P{r.end}</span></p>')
-                actions.append(("region", r.start))
         if self.profile is None:
             frags.append('<p style="font-size:11pt; color:#868e96; margin:10pt">'
                          "（请先在顶部选择一个格式方案）</p>")
-            actions.append(("none", None))
         else:
             order = [tid for tid, _label in TYPE_ITEMS]
             shown = [tid for tid in order if self._merged_styles(tid)]
@@ -905,16 +1039,9 @@ class ShushanWorkbench(QMainWindow):
                         f'&nbsp;&nbsp;{fmt_detail(spec_to_fmt_patch(spec)) or "（保持 Word 默认）"}'
                         f'</p>')
                 frags.append(card)
-                actions.append(("type", tid))
                 self._card_tid.append(tid)
         blocks = insert_blocks(self.card_view.document(), frags)
-        self._card_b2t = {}
-        self._card_region_jump = {}
-        for blk, (kind, val) in zip(blocks, actions):
-            if kind == "type":
-                self._card_b2t[blk] = val
-            elif kind == "region":
-                self._card_region_jump[blk] = val
+        self._card_b2t = dict(zip(blocks, self._card_tid))
 
     # ================= 选择与联动 =================
     def _scope(self) -> set:
@@ -943,15 +1070,6 @@ class ShushanWorkbench(QMainWindow):
         self._after_selection_change()
 
     def _on_card_click(self, block_no, modifiers):
-        jump = self._card_region_jump.get(block_no)
-        if jump is not None:
-            self.selected = {jump}
-            self._anchor = jump
-            block = self.view.document().findBlockByNumber(self._p2b.get(jump, -1))
-            if block.isValid():
-                self._scroll_block_to_middle(block)
-            self._after_selection_change()
-            return
         tid = self._card_b2t.get(block_no)
         if tid is None or self.analysis is None:
             return
@@ -969,6 +1087,7 @@ class ShushanWorkbench(QMainWindow):
     def _after_selection_change(self):
         self._refresh_highlights()
         self._sync_selection_label()
+        self._update_detail_panel()
         self._sync_ribbon()
 
     def _sync_selection_label(self):
@@ -1267,6 +1386,7 @@ class ShushanWorkbench(QMainWindow):
         self.log_line(f"[区域] 已标记 {REGION_LABELS.get(rtype, rtype)}：P{lo}–P{hi}"
                       f"（规则重跑改写 {rep['changed']} 段，"
                       f"{len(rep['numbered_off'])} 个标题默认仅大纲）")
+        self._refresh_region_list()
         self._refresh_after_edit(cards=True)
 
     def _clear_region_marks(self):
@@ -1288,6 +1408,7 @@ class ShushanWorkbench(QMainWindow):
             if any(r.start <= p.index <= r.end for r in cleared):
                 self.assignment[p.index] = p.suggestion
         self.log_line("[区域] 已清除选中范围的区域标记（建议还原到分析基线）")
+        self._refresh_region_list()
         self._refresh_after_edit(cards=True)
 
     # ================= 页面视图（Word 真渲染，M2.7） =================
@@ -1422,6 +1543,7 @@ class ShushanWorkbench(QMainWindow):
             self.page_banner.setVisible(False)
 
     def closeEvent(self, ev):
+        self._save_layout()
         if self._page_tmp:
             shutil.rmtree(self._page_tmp, ignore_errors=True)
             self._page_tmp = None

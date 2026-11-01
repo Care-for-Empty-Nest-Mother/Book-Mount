@@ -24,9 +24,12 @@ from .page_furniture import (apply_headers_footers, apply_toc_updates,
                              restyle_table_cells, paragraph_section_map)
 from .styles_xml import _spacing_xml, _indent_xml, _set_font
 
-# 段落直接格式里允许被清除的属性（其余如 sectPr 保留）
+# 段落直接格式里允许被清除的属性（其余如 sectPr 保留）。
+# w:pageBreakBefore 不在清除列表：段前分页是版面结构（决定分页位置），
+# 清掉会改变原文分页布局（封面/摘要页空白、章节起始页漂移）；方案 styles
+# 的 page_break_before 字段经样式生效，不受影响。
 CLEAR_PPR_TAGS = ["w:rPr", "w:numPr", "w:outlineLvl", "w:jc", "w:spacing", "w:ind",
-                  "w:keepNext", "w:keepLines", "w:pageBreakBefore", "w:textAlignment",
+                  "w:keepNext", "w:keepLines", "w:textAlignment",
                   "w:pBdr", "w:shd", "w:tabs"]
 
 

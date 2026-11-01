@@ -19,9 +19,12 @@ _PDF_MAGIC = b"%PDF-"
 
 
 def export_pdf_via_word(docx_path, out_pdf) -> Path:
-    """后台 Word 把 docx 导出为 PDF（返回 out_pdf 路径）。"""
-    docx_path = str(docx_path)
-    out_pdf = str(out_pdf)
+    """后台 Word 把 docx 导出为 PDF（返回 out_pdf 路径）。
+
+    路径一律转绝对——Word COM 以自身工作目录解析相对路径（会落到 system32）。
+    """
+    docx_path = str(Path(docx_path).resolve())
+    out_pdf = str(Path(out_pdf).resolve())
     if not Path(docx_path).exists():
         raise FileNotFoundError(docx_path)
     try:
@@ -97,11 +100,15 @@ def render_pages_from_docx(docx_path, dpi: int = 110,
     """docx → 逐页 PNG（工作台线程与测试的共用入口）。
 
     workdir：PDF 中转目录（默认系统临时目录；工作台传入会话级临时目录便于清理）。
+    路径一律转绝对（Word COM 以自身工作目录解析相对路径）。
     """
+    docx_path = str(Path(docx_path).resolve())
     tmp = None
     if workdir is None:
         tmp = tempfile.TemporaryDirectory(prefix="shushan_pdf_")
         workdir = tmp.name
+    else:
+        workdir = str(Path(workdir).resolve())
     pdf_path = Path(workdir) / (Path(docx_path).stem + ".pdf")
     try:
         export_pdf_via_word(docx_path, pdf_path)
