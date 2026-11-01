@@ -42,6 +42,8 @@ class AnalysisResult:
     uncited_entries: list = field(default_factory=list)     # 未被引用的文献序号
     header_footer: dict = field(default_factory=dict)     # 页眉页脚配置（M2 提取）
     table_cell_style: dict = field(default_factory=dict)  # 表格单元格文字样式多数派（M2）
+    section_ends: list = field(default_factory=list)      # 各节末段段落号（区域预填用）
+    first_section_is_cover: bool = False                  # 首节是否判定为封面（M2.5）
 
     def nonempty(self):
         """可归类段落：有文字，或承载图片/公式（对象段也有版式可提取）。"""
@@ -324,6 +326,14 @@ def analyze_document(path) -> AnalysisResult:
         first_section_is_cover = not any(
             RE_CHAPTER.match(p.text.strip()) or RE_NUM_HEAD.match(p.text.strip())
             for p in doc.paragraphs[:sec0_end + 1] if p.text.strip())
+    result.first_section_is_cover = first_section_is_cover
+    # 各节末段（body 级 sectPr 收尾最后一节；末段自带分节符时不重复）
+    last_i = len(doc.paragraphs) - 1
+    for i, para in enumerate(doc.paragraphs):
+        if para._p.find(qn("w:pPr") + "/" + qn("w:sectPr")) is not None:
+            result.section_ends.append(i)
+    if not result.section_ends or result.section_ends[-1] < last_i:
+        result.section_ends.append(last_i)
 
     for i, para in enumerate(doc.paragraphs):
         text = para.text

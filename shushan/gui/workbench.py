@@ -32,6 +32,9 @@ from ..analyzer.docx_analyzer import AnalysisResult, analyze_document
 from ..convert import ensure_docx
 from ..profile import ProfileError, load_profile, save_profile
 from ..profile_builder import build_profile, spec_to_fmt_patch
+from ..regions import (MARKABLE_TYPES, REGION_COLORS, REGION_LABELS, Region,
+                       apply_region_rules, normalize_regions, region_type_at,
+                       restore_suggestions, seed_regions)
 from ..render import apply_profile_offline
 from ..render.dotx_renderer import render_dotx
 from ..types import CN_FONT_SIZES, IGNORE_TYPE
@@ -168,6 +171,12 @@ class ShushanWorkbench(QMainWindow):
         self._b2p: dict = {}
         self._card_tid: list = []
         self._card_b2t: dict = {}
+        self._card_region_jump: dict = {}
+        # 区域标记（M2.6）
+        self.regions: list = []
+        self._base_suggestion: dict = {}
+        self._base_reasons: dict = {}
+        self._touched_numbered: set = set()
 
         self._build_ui()
         self._bind_shortcuts()
@@ -382,6 +391,26 @@ class ShushanWorkbench(QMainWindow):
         btn_upd.clicked.connect(self._update_style)
         sl.addWidget(btn_upd)
         lay.addWidget(g_style)
+
+        # ---- 区域组（M2.6）----
+        g_region = QGroupBox("区域")
+        rl = QHBoxLayout(g_region)
+        rl.setContentsMargins(4, 2, 4, 8)
+        self.region_combo = QComboBox()
+        for tid, label in MARKABLE_TYPES:
+            self.region_combo.addItem(label, tid)
+        self.region_combo.setToolTip("先点选/框选段落，再标记为所选区域类型；"
+                                     "区间内的表格与图片随区间归属")
+        rl.addWidget(self.region_combo, stretch=1)
+        self.btn_region_mark = QPushButton("标记选中区域")
+        self.btn_region_mark.setToolTip("把选中段落范围标记为所选区域，识别规则按区域重跑")
+        self.btn_region_mark.clicked.connect(self._mark_region)
+        rl.addWidget(self.btn_region_mark)
+        self.btn_region_clear = QPushButton("清除标记")
+        self.btn_region_clear.setToolTip("清除与选中范围重叠的区域标记（建议还原到分析基线）")
+        self.btn_region_clear.clicked.connect(self._clear_region_marks)
+        rl.addWidget(self.btn_region_clear)
+        lay.addWidget(g_region)
 
         # ---- 通用组 ----
         g_ops = QGroupBox("")
@@ -648,6 +677,10 @@ class ShushanWorkbench(QMainWindow):
         self.paras = analysis.paragraphs
         self._docx = None
         self._nonempty_idx = {p.index for p in analysis.nonempty()}
+        self._base_suggestion = {p.index: p.suggestion for p in analysis.nonempty()}
+        self._base_reasons = {p.index: p.reason for p in analysis.nonempty()}
+        self._touched_numbered = set()
+        self.regions = seed_regions(analysis)
         self.suggestion = {p.index: p.suggestion for p in analysis.nonempty()}
         self.assignment = dict(self.suggestion)
         self.numbered = {p.index: True for p in analysis.nonempty()
@@ -662,6 +695,8 @@ class ShushanWorkbench(QMainWindow):
         self.btn_confirm.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._ribbon_set_enabled(True)
+        for w in (self.region_combo, self.btn_region_mark, self.btn_region_clear):
+            w.setEnabled(True)
         self._rebuild_cards()
         self._rebuild_preview()
         self._refresh_highlights()
@@ -675,6 +710,8 @@ class ShushanWorkbench(QMainWindow):
         self.btn_confirm.setEnabled(False)
         self.btn_reset.setEnabled(False)
         self._ribbon_set_enabled(False)
+        for w in (self.region_combo, self.btn_region_mark, self.btn_region_clear):
+            w.setEnabled(False)
         self.sel_label.setText("未加载文档")
         self.view.setHtml(EMPTY_GUIDE.replace("its", "它的"))
         self._p2b, self._b2p = {}, {}
@@ -720,6 +757,13 @@ class ShushanWorkbench(QMainWindow):
             marks += "✍"
         if marks:
             mark = f"{mark} {marks}"
+        # 区域横幅：区域首段的徽标前置【区域名】并换区域色（不插行，零位移）
+        if self.regions:
+            rt = region_type_at(self.regions, idx)
+            if rt != "auto" and any(r.type == rt and r.start == idx
+                                    for r in self.regions):
+                mark = f"【{REGION_LABELS.get(rt, rt)}】 {mark}"
+                badge = REGION_COLORS.get(rt, badge)
         return mark, badge
 
     def _cell_css(self, cell) -> str:
@@ -779,37 +823,58 @@ class ShushanWorkbench(QMainWindow):
         self.card_view.setExtraSelections(csels)
 
     def _rebuild_cards(self):
-        self._card_tid = []
         frags = []
+        actions = []                       # ("type", tid) / ("region", start) / ("none", None)
+        self._card_tid = []
+        # 区域总览卡（点击定位区域首段）
+        if self.regions:
+            frags.append('<p style="font-size:9pt; color:#1a3c34; margin:2pt 0">'
+                         "<b>区域</b>（点击定位）</p>")
+            actions.append(("none", None))
+            for r in self.regions:
+                color = REGION_COLORS.get(r.type, "#868e96")
+                label = REGION_LABELS.get(r.type, r.type)
+                frags.append(
+                    f'<p style="font-size:9pt; margin:1pt 0 1pt 4pt">'
+                    f'<span style="background-color:{color}; color:#fff; '
+                    f'font-size:8pt">&nbsp;{label}&nbsp;</span>'
+                    f' <span style="color:#495057">P{r.start}–P{r.end}</span></p>')
+                actions.append(("region", r.start))
         if self.profile is None:
             frags.append('<p style="font-size:11pt; color:#868e96; margin:10pt">'
                          "（请先在顶部选择一个格式方案）</p>")
-            self._card_b2t = {b: tid for b, tid in zip(
-                insert_blocks(self.card_view.document(), frags), self._card_tid)}
-            return
-        order = [tid for tid, _label in TYPE_ITEMS]
-        shown = [tid for tid in order if self._merged_styles(tid)]
-        used = set()
-        if self.analysis is not None:
-            used = {self.assignment.get(p.index, p.suggestion)
-                    for p in self.analysis.nonempty()}
-        extra = [tid for tid in order if tid in used and tid not in shown]
-        for tid in shown + extra:
-            spec = self._merged_styles(tid) or {}
-            label = label_of(tid)
-            badge, badge_color = colors_of(tid)
-            sample = SAMPLE_TEXT.get(tid, label)
-            card = (f'<p style="{para_css(spec_to_fmt_patch(spec))}">'
-                    f'<span style="background-color:{badge_color}; color:#fff; '
-                    f'font-size:8pt">&nbsp;{label}&nbsp;</span>&nbsp;'
-                    f'{_html.escape(sample)}</p>'
-                    f'<p style="font-size:8pt; color:#868e96; margin:0 0 6pt 0">'
-                    f'&nbsp;&nbsp;{fmt_detail(spec_to_fmt_patch(spec)) or "（保持 Word 默认）"}'
-                    f'</p>')
-            frags.append(card)
-            self._card_tid.append(tid)
-        self._card_b2t = {b: tid for b, tid in zip(
-            insert_blocks(self.card_view.document(), frags), self._card_tid)}
+            actions.append(("none", None))
+        else:
+            order = [tid for tid, _label in TYPE_ITEMS]
+            shown = [tid for tid in order if self._merged_styles(tid)]
+            used = set()
+            if self.analysis is not None:
+                used = {self.assignment.get(p.index, p.suggestion)
+                        for p in self.analysis.nonempty()}
+            extra = [tid for tid in order if tid in used and tid not in shown]
+            for tid in shown + extra:
+                spec = self._merged_styles(tid) or {}
+                label = label_of(tid)
+                badge, badge_color = colors_of(tid)
+                sample = SAMPLE_TEXT.get(tid, label)
+                card = (f'<p style="{para_css(spec_to_fmt_patch(spec))}">'
+                        f'<span style="background-color:{badge_color}; color:#fff; '
+                        f'font-size:8pt">&nbsp;{label}&nbsp;</span>&nbsp;'
+                        f'{_html.escape(sample)}</p>'
+                        f'<p style="font-size:8pt; color:#868e96; margin:0 0 6pt 0">'
+                        f'&nbsp;&nbsp;{fmt_detail(spec_to_fmt_patch(spec)) or "（保持 Word 默认）"}'
+                        f'</p>')
+                frags.append(card)
+                actions.append(("type", tid))
+                self._card_tid.append(tid)
+        blocks = insert_blocks(self.card_view.document(), frags)
+        self._card_b2t = {}
+        self._card_region_jump = {}
+        for blk, (kind, val) in zip(blocks, actions):
+            if kind == "type":
+                self._card_b2t[blk] = val
+            elif kind == "region":
+                self._card_region_jump[blk] = val
 
     # ================= 选择与联动 =================
     def _scope(self) -> set:
@@ -838,6 +903,15 @@ class ShushanWorkbench(QMainWindow):
         self._after_selection_change()
 
     def _on_card_click(self, block_no, modifiers):
+        jump = self._card_region_jump.get(block_no)
+        if jump is not None:
+            self.selected = {jump}
+            self._anchor = jump
+            block = self.view.document().findBlockByNumber(self._p2b.get(jump, -1))
+            if block.isValid():
+                self._scroll_block_to_middle(block)
+            self._after_selection_change()
+            return
         tid = self._card_b2t.get(block_no)
         if tid is None or self.analysis is None:
             return
@@ -925,6 +999,7 @@ class ShushanWorkbench(QMainWindow):
         if not tid.startswith("heading_"):
             return
         self._push_undo()
+        self._touched_numbered.add(idx)             # 用户手动动过对号，区域规则不再覆盖
         self.numbered[idx] = not self.numbered.get(idx, True)
         self._refresh_after_edit()
 
@@ -1130,6 +1205,51 @@ class ShushanWorkbench(QMainWindow):
                       f"（仅本次整稿生效）")
         self._refresh_after_edit(cards=True)
 
+    # ================= 区域标记（M2.6） =================
+    def _mark_region(self):
+        if self.analysis is None or not self.selected:
+            QMessageBox.information(self, APP_TITLE, "请先点选/框选要标记的段落。")
+            return
+        rtype = self.region_combo.currentData()
+        if not rtype:
+            return
+        lo, hi = min(self.selected), max(self.selected)
+        self._push_undo()
+        self.regions = normalize_regions(
+            self.regions + [Region(rtype, lo, hi)], len(self.paras))
+        rep = apply_region_rules(self.analysis, self.regions)
+        for idx in rep["numbered_off"]:
+            if idx not in self._touched_numbered:
+                self.numbered[idx] = False          # 非正文区标题：仅大纲不占号
+        for p in self.analysis.nonempty():          # 区内建议重置为区域规则结果
+            if rep["region_of"].get(p.index, "auto") != "auto":
+                self.assignment[p.index] = p.suggestion
+        self.log_line(f"[区域] 已标记 {REGION_LABELS.get(rtype, rtype)}：P{lo}–P{hi}"
+                      f"（规则重跑改写 {rep['changed']} 段，"
+                      f"{len(rep['numbered_off'])} 个标题默认仅大纲）")
+        self._refresh_after_edit(cards=True)
+
+    def _clear_region_marks(self):
+        if self.analysis is None or not self.selected or not self.regions:
+            return
+        lo, hi = min(self.selected), max(self.selected)
+        cleared = [r for r in self.regions
+                   if r.type != "auto" and not (r.end < lo or r.start > hi)]
+        if not cleared:
+            self.log_line("[区域] 选中范围内没有可清除的标记")
+            return
+        self._push_undo()
+        self.regions = normalize_regions(
+            [r for r in self.regions if r not in cleared], len(self.paras))
+        restore_suggestions(self.analysis, self._base_suggestion,
+                            self._base_reasons, cleared,
+                            self._touched_numbered, self.numbered)
+        for p in self.analysis.nonempty():
+            if any(r.start <= p.index <= r.end for r in cleared):
+                self.assignment[p.index] = p.suggestion
+        self.log_line("[区域] 已清除选中范围的区域标记（建议还原到分析基线）")
+        self._refresh_after_edit(cards=True)
+
     def _on_reset(self):
         if self.analysis is None:
             return
@@ -1164,6 +1284,12 @@ class ShushanWorkbench(QMainWindow):
         if self.style_edits:
             profile.setdefault("styles", {}).update(copy.deepcopy(self.style_edits))
         assignment = dict(self.assignment)
+        # 区域规则可能建议出方案未定义的类型——补空样式定义（Word 默认），
+        # 避免"样式不存在"告警且段落原样保留
+        styles = profile.setdefault("styles", {})
+        for tid in set(assignment.values()):
+            if tid and tid != IGNORE_TYPE and tid not in styles:
+                styles[tid] = {}
         if numbering_override == "__dialog__":
             override = self._ask_numbering_mode(assignment)
             if override is None:
