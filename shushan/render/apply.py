@@ -48,6 +48,10 @@ def resolve_assignment(analysis, profile, para_override: dict | None = None) -> 
             assign[p.index] = p.suggestion
             continue
         t = mapping.get(sig_str(p.signature))
+        if t and t.startswith("heading_") and p.suggestion == "cover":
+            # 封面标题不设大纲级别（识别修正优先于旧映射，防止旧方案把
+            # 封面大标题带进编号体系）
+            t = None
         assign[p.index] = t if t else p.suggestion
     return assign
 
@@ -333,7 +337,8 @@ MODE_LABELS = {
 }
 
 # 前置区类型（摘要/关键词等）：正文起编与目录插入点要跳过它们之前的标题段
-FRONT_MATTER_TYPES = ("abstract", "en_abstract", "keywords", "en_keywords")
+FRONT_MATTER_TYPES = ("abstract", "en_abstract", "keywords", "en_keywords",
+                      "cover", "statement")
 
 
 def find_body_heading_index(analysis, assignment: dict) -> int | None:

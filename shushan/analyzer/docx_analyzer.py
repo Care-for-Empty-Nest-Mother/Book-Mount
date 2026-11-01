@@ -309,6 +309,22 @@ def analyze_document(path) -> AnalysisResult:
     result = AnalysisResult(path=str(path), page=read_page_setup(doc), source_path=str(path))
 
     from .cluster import suggest_type   # 延迟导入避免环
+
+    # ---- 识别修正：多节文档的首节一般是封面，封面标题不设大纲级别 ----
+    # 首节 = 第一个内嵌分节符之前的区域；若首节里已出现「第X章/1.1」这类
+    # 章节编号，说明它不是纯封面（如封面与正文未分节的期刊稿），不启用该规则。
+    sec0_end = None
+    for i, para in enumerate(doc.paragraphs):
+        if para._p.find(qn("w:pPr") + "/" + qn("w:sectPr")) is not None:
+            sec0_end = i
+            break
+    first_section_is_cover = False
+    if sec0_end is not None:
+        from .cluster import RE_CHAPTER, RE_NUM_HEAD
+        first_section_is_cover = not any(
+            RE_CHAPTER.match(p.text.strip()) or RE_NUM_HEAD.match(p.text.strip())
+            for p in doc.paragraphs[:sec0_end + 1] if p.text.strip())
+
     for i, para in enumerate(doc.paragraphs):
         text = para.text
         has_obj = paragraph_has_object(para._p)
@@ -321,6 +337,9 @@ def analyze_document(path) -> AnalysisResult:
         fmt = effective_para_format(para, sdb)
         sig = format_signature(fmt)
         sug, conf, reason = suggest_type(text, fmt, result)
+        if (first_section_is_cover and i <= sec0_end
+                and sug.startswith("heading_")):
+            sug, conf, reason = "cover", 0.75, "首节视为封面：标题不设大纲级别"
         if has_obj:
             if kind == "formula":
                 sug, conf, reason = "formula_para", 0.9, "公式段（版式提取）"
