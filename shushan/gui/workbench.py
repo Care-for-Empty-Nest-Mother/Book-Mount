@@ -215,7 +215,6 @@ class ShushanWorkbench(QMainWindow):
         cl.setContentsMargins(6, 4, 6, 4)
         cl.setSpacing(3)
         cl.addWidget(self._build_topbar())
-        cl.addWidget(self._build_ribbon())
         cl.addWidget(self.view_stack, stretch=1)
 
         foot = QHBoxLayout()
@@ -258,6 +257,11 @@ class ShushanWorkbench(QMainWindow):
         self.detail_dock.setObjectName("detailDock")
         self.detail_dock.setWidget(self._build_detail_panel())
         self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
+        self.adjust_dock = QDockWidget("格式调整", self)
+        self.adjust_dock.setObjectName("adjustDock")
+        self.adjust_dock.setWidget(self._build_adjust_panel())
+        self.addDockWidget(Qt.RightDockWidgetArea, self.adjust_dock)
+        self.splitDockWidget(self.adjust_dock, self.detail_dock, Qt.Vertical)
 
         self.log_dock = QDockWidget("日志", self)
         self.log_dock.setObjectName("logDock")
@@ -270,7 +274,7 @@ class ShushanWorkbench(QMainWindow):
 
     def _build_view_menu(self):
         menu = self.menuBar().addMenu("视图")
-        for dock in (self.style_dock, self.region_dock,
+        for dock in (self.style_dock, self.region_dock, self.adjust_dock,
                      self.detail_dock, self.log_dock):
             menu.addAction(dock.toggleViewAction())
         menu.addSeparator()
@@ -279,18 +283,19 @@ class ShushanWorkbench(QMainWindow):
 
     def _resize_default_docks(self):
         self.resizeDocks([self.style_dock, self.region_dock], [330], Qt.Horizontal)
-        self.resizeDocks([self.detail_dock], [280], Qt.Horizontal)
+        self.resizeDocks([self.adjust_dock], [270], Qt.Horizontal)
+        self.resizeDocks([self.detail_dock], [240], Qt.Vertical)
         self.resizeDocks([self.log_dock], [110], Qt.Vertical)
 
     def _save_layout(self):
         try:
-            self._settings.setValue("dock_state", self.saveState())
+            self._settings.setValue("dock_state_v2", self.saveState())
             self._settings.setValue("main_geometry", self.saveGeometry())
         except Exception:
             pass
 
     def _restore_or_default_layout(self):
-        state = self._settings.value("dock_state")
+        state = self._settings.value("dock_state_v2")
         if state is not None:
             try:
                 self.restoreState(state)
@@ -303,7 +308,7 @@ class ShushanWorkbench(QMainWindow):
         self._resize_default_docks()
 
     def _reset_layout(self):
-        for d in (self.style_dock, self.region_dock,
+        for d in (self.style_dock, self.region_dock, self.adjust_dock,
                   self.detail_dock, self.log_dock):
             d.setFloating(False)
             self.removeDockWidget(d)
@@ -311,9 +316,11 @@ class ShushanWorkbench(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.region_dock)
         self.tabifyDockWidget(self.style_dock, self.region_dock)
         self.style_dock.raise_()
+        self.addDockWidget(Qt.RightDockWidgetArea, self.adjust_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.detail_dock)
+        self.splitDockWidget(self.adjust_dock, self.detail_dock, Qt.Vertical)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-        for d in (self.style_dock, self.region_dock,
+        for d in (self.style_dock, self.region_dock, self.adjust_dock,
                   self.detail_dock, self.log_dock):
             d.show()
         self._resize_default_docks()
@@ -470,51 +477,77 @@ class ShushanWorkbench(QMainWindow):
         lay.addStretch(1)
         return bar
 
-    def _build_ribbon(self) -> QWidget:
-        bar = QWidget()
-        bar.setStyleSheet(RIBBON_CSS)
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(6, 4, 6, 2)
-        lay.setSpacing(6)
+    def _build_adjust_panel(self) -> QWidget:
+        """右侧竖排格式调整面板（旧顶部功能区迁入；控件/快捷键/处理函数不变）。"""
+        panel = QWidget()
+        panel.setStyleSheet(RIBBON_CSS)
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(5)
 
-        # ---- 字体组 ----
+        # ---- 类型与样式 ----
+        g_style = QGroupBox("类型与样式")
+        sl = QVBoxLayout(g_style)
+        sl.setContentsMargins(6, 2, 6, 6)
+        sl.setSpacing(3)
+        self.type_combo = QComboBox()
+        for tid, label in TYPE_ITEMS:
+            self.type_combo.addItem(label, tid)
+        self.type_combo.setToolTip("选中段的类型（可改判）")
+        sl.addWidget(self.type_combo)
+        row_s = QHBoxLayout()
+        row_s.setSpacing(4)
+        btn_reassign = QPushButton("改判")
+        btn_reassign.setToolTip("把选中段落改判为所选类型 (Ctrl+Shift+N=改判为正文)")
+        btn_reassign.clicked.connect(self._on_reassign)
+        row_s.addWidget(btn_reassign)
+        btn_upd = QPushButton("更新到类型样式")
+        btn_upd.setToolTip("把所选段落的格式提升为该类型的样式\n"
+                           "（Word「更新样式以匹配所选内容」；仅本次整稿生效）")
+        btn_upd.clicked.connect(self._update_style)
+        row_s.addWidget(btn_upd)
+        sl.addLayout(row_s)
+        lay.addWidget(g_style)
+
+        # ---- 字体 ----
         g_font = QGroupBox("字体")
-        fl = QHBoxLayout(g_font)
-        fl.setContentsMargins(4, 2, 4, 8)
+        fl = QVBoxLayout(g_font)
+        fl.setContentsMargins(6, 2, 6, 6)
+        fl.setSpacing(3)
         self.font_combo = QComboBox()
-        self.font_combo.setMinimumWidth(150)
         self.font_combo.setToolTip("字体（同设中/西文，与 Word 一致）；"
                                    "中西文分别设置请右键→修改格式")
         fill_font_combo(self.font_combo)
         self.font_combo.currentTextChanged.connect(self._on_font_changed)
-        fl.addWidget(self.font_combo, stretch=3)
+        fl.addWidget(self.font_combo)
+        row_f = QHBoxLayout()
+        row_f.setSpacing(3)
         self.size_combo = QComboBox()
-        self.size_combo.setMinimumWidth(80)
         fill_size_combo(self.size_combo)
         self.size_combo.currentIndexChanged.connect(self._on_size_index)
-        fl.addWidget(self.size_combo, stretch=1)
+        row_f.addWidget(self.size_combo, stretch=2)
         self.btn_bold = self._glyph_button("B", True, False, "加粗 (Ctrl+B)",
                                            self._toggle_bold)
         self.btn_italic = self._glyph_button("I", False, True, "斜体 (Ctrl+I)",
                                              self._toggle_italic)
-        fl.addWidget(self.btn_bold)
-        fl.addWidget(self.btn_italic)
         self.color = "#000000"
         self.btn_color = QToolButton()
         self.btn_color.setIcon(make_icon("font_color", self.color))
         self.btn_color.setToolTip("字体颜色")
         self.btn_color.clicked.connect(self._pick_color)
-        fl.addWidget(self.btn_color)
+        row_f.addWidget(self.btn_bold)
+        row_f.addWidget(self.btn_italic)
+        row_f.addWidget(self.btn_color)
+        fl.addLayout(row_f)
         lay.addWidget(g_font)
 
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.VLine)
-        sep1.setStyleSheet("color:#d0d0d0")
-        lay.addWidget(sep1)
-
-        # ---- 段落组 ----
+        # ---- 段落 ----
         g_para = QGroupBox("段落")
-        pl = QHBoxLayout(g_para)
-        pl.setContentsMargins(4, 2, 4, 8)
+        pl = QVBoxLayout(g_para)
+        pl.setContentsMargins(6, 2, 6, 6)
+        pl.setSpacing(3)
+        row_a = QHBoxLayout()
+        row_a.setSpacing(3)
         self.align_btns = {}
         for kind, tip in (("left", "左对齐 (Ctrl+L)"), ("center", "居中 (Ctrl+E)"),
                           ("right", "右对齐 (Ctrl+R)"), ("justify", "两端对齐 (Ctrl+J)")):
@@ -524,7 +557,37 @@ class ShushanWorkbench(QMainWindow):
             b.setCheckable(True)
             b.clicked.connect(lambda _=False, k=kind: self._set_align(k))
             self.align_btns[kind] = b
-            pl.addWidget(b)
+            row_a.addWidget(b)
+        pl.addLayout(row_a)
+        self.line_combo = QComboBox()
+        self.line_combo.setToolTip("行距 (Ctrl+1 / Ctrl+5 / Ctrl+2)")
+        for mode, v in LINE_ITEMS:
+            self.line_combo.addItem(f"{v:g} 倍", (mode, v))
+        self.line_combo.currentIndexChanged.connect(self._on_line_index)
+        pl.addWidget(self.line_combo)
+        row_sp = QHBoxLayout()
+        row_sp.setSpacing(3)
+        self.before_spin = QDoubleSpinBox()
+        self.before_spin.setRange(0, 200)
+        self.before_spin.setDecimals(1)
+        self.before_spin.setSingleStep(0.5)
+        self.before_spin.setPrefix("前 ")
+        self.before_spin.setSuffix("磅")
+        self.before_spin.setToolTip("段前间距（磅）")
+        self.before_spin.valueChanged.connect(self._on_before_changed)
+        self.after_spin = QDoubleSpinBox()
+        self.after_spin.setRange(0, 200)
+        self.after_spin.setDecimals(1)
+        self.after_spin.setSingleStep(0.5)
+        self.after_spin.setPrefix("后 ")
+        self.after_spin.setSuffix("磅")
+        self.after_spin.setToolTip("段后间距（磅）")
+        self.after_spin.valueChanged.connect(self._on_after_changed)
+        row_sp.addWidget(self.before_spin)
+        row_sp.addWidget(self.after_spin)
+        pl.addLayout(row_sp)
+        row_ind = QHBoxLayout()
+        row_ind.setSpacing(3)
         self.btn_indent_inc = QToolButton()
         self.btn_indent_inc.setIcon(make_icon("indent_inc"))
         self.btn_indent_inc.setToolTip("增加首行缩进 0.5 字符 (Ctrl+M)")
@@ -533,62 +596,19 @@ class ShushanWorkbench(QMainWindow):
         self.btn_indent_dec.setIcon(make_icon("indent_dec"))
         self.btn_indent_dec.setToolTip("减少首行缩进 0.5 字符 (Ctrl+Shift+M)")
         self.btn_indent_dec.clicked.connect(lambda: self._indent_step(-0.5))
-        pl.addWidget(self.btn_indent_inc)
-        pl.addWidget(self.btn_indent_dec)
-        self.line_combo = QComboBox()
-        self.line_combo.setToolTip("行距 (Ctrl+1 / Ctrl+5 / Ctrl+2)")
-        for mode, v in LINE_ITEMS:
-            self.line_combo.addItem(f"{v:g} 倍", (mode, v))
-        self.line_combo.currentIndexChanged.connect(self._on_line_index)
-        pl.addWidget(self.line_combo)
-        self.before_spin = QDoubleSpinBox()
-        self.before_spin.setRange(0, 200)
-        self.before_spin.setDecimals(1)
-        self.before_spin.setSingleStep(0.5)
-        self.before_spin.setPrefix("段前 ")
-        self.before_spin.setSuffix("磅")
-        self.before_spin.setToolTip("段前间距（磅）")
-        self.before_spin.valueChanged.connect(self._on_before_changed)
-        self.after_spin = QDoubleSpinBox()
-        self.after_spin.setRange(0, 200)
-        self.after_spin.setDecimals(1)
-        self.after_spin.setSingleStep(0.5)
-        self.after_spin.setPrefix("段后 ")
-        self.after_spin.setSuffix("磅")
-        self.after_spin.setToolTip("段后间距（磅）")
-        self.after_spin.valueChanged.connect(self._on_after_changed)
-        pl.addWidget(self.before_spin)
-        pl.addWidget(self.after_spin)
+        row_ind.addWidget(self.btn_indent_dec)
+        row_ind.addWidget(self.btn_indent_inc)
+        lab_ind = QLabel("首行缩进 ±0.5 字符")
+        lab_ind.setStyleSheet("color:#666; font-size:11px;")
+        row_ind.addWidget(lab_ind, stretch=1)
+        pl.addLayout(row_ind)
         lay.addWidget(g_para)
 
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.VLine)
-        sep2.setStyleSheet("color:#d0d0d0")
-        lay.addWidget(sep2)
-
-        # ---- 样式组 ----
-        g_style = QGroupBox("样式")
-        sl = QHBoxLayout(g_style)
-        sl.setContentsMargins(4, 2, 4, 8)
-        self.type_combo = QComboBox()
-        for tid, label in TYPE_ITEMS:
-            self.type_combo.addItem(label, tid)
-        self.type_combo.setToolTip("选中段的类型（可改判）")
-        sl.addWidget(self.type_combo, stretch=1)
-        btn_reassign = QPushButton("改判")
-        btn_reassign.setToolTip("把选中段落改判为所选类型 (Ctrl+Shift+N=改判为正文)")
-        btn_reassign.clicked.connect(self._on_reassign)
-        sl.addWidget(btn_reassign)
-        btn_upd = QPushButton("更新到类型样式")
-        btn_upd.setToolTip("把所选段落的格式提升为该类型的样式\n"
-                           "（Word「更新样式以匹配所选内容」；仅本次整稿生效）")
-        btn_upd.clicked.connect(self._update_style)
-        sl.addWidget(btn_upd)
-        lay.addWidget(g_style)
-
-        # ---- 通用组 ----
-        g_ops = QGroupBox("")
+        # ---- 操作 ----
+        g_ops = QGroupBox("操作")
         ol = QHBoxLayout(g_ops)
-        ol.setContentsMargins(4, 2, 4, 8)
+        ol.setContentsMargins(6, 2, 6, 6)
+        ol.setSpacing(3)
         self.btn_clear = QToolButton()
         self.btn_clear.setIcon(make_icon("clear_format"))
         self.btn_clear.setToolTip("清除本段的格式修改 (Ctrl+Q)")
@@ -597,14 +617,14 @@ class ShushanWorkbench(QMainWindow):
         self.btn_undo = QPushButton("↺ 撤销")
         self.btn_undo.setToolTip("撤销 (Ctrl+Z)")
         self.btn_undo.clicked.connect(self._undo)
+        ol.addWidget(self.btn_undo, stretch=1)
         self.btn_redo = QPushButton("↻ 重做")
         self.btn_redo.setToolTip("重做 (Ctrl+Y)")
         self.btn_redo.clicked.connect(self._redo)
-        ol.addWidget(self.btn_undo)
-        ol.addWidget(self.btn_redo)
+        ol.addWidget(self.btn_redo, stretch=1)
         lay.addWidget(g_ops)
         lay.addStretch(1)
-        return bar
+        return panel
 
     def _glyph_button(self, text, bold, italic, tip, slot) -> QToolButton:
         b = QToolButton()
