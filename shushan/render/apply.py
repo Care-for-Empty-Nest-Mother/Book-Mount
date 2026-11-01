@@ -471,6 +471,7 @@ def apply_profile_offline(profile: dict, docx_path, para_override: dict | None =
     renumbered = 0
     unnumbered = 0
     outline_only = 0
+    suppressed_num = 0
     for p in analysis.nonempty():
         tid = assignment.get(p.index, "body_text")
         if tid == IGNORE_TYPE:
@@ -502,8 +503,13 @@ def apply_profile_offline(profile: dict, docx_path, para_override: dict | None =
             #   非标题段的原有自动编号是内容结构（参考文献 [1][2]、项目列表），必须保留
             old_num = p.fmt.get("num_id") if p.fmt else None
             if old_num and not is_heading:
-                reattach_numbering(p_new, old_num, p.fmt.get("num_ilvl", 0))
-                renumbered += 1
+                if tid == "cover":
+                    # 封面段落不参与任何编号（旧稿残留的列表编号一并压掉）
+                    suppress_numbering(p_new)
+                    suppressed_num += 1
+                else:
+                    reattach_numbering(p_new, old_num, p.fmt.get("num_ilvl", 0))
+                    renumbered += 1
             if fmt_overrides and p.index in fmt_overrides:
                 apply_format_override(p_new, fmt_overrides[p.index])
             counts[tid] = counts.get(tid, 0) + 1
@@ -573,6 +579,7 @@ def apply_profile_offline(profile: dict, docx_path, para_override: dict | None =
         "ignored": skipped,
         "protected_objects": protected,
         "numbering_preserved": renumbered,
+        "numbering_suppressed": suppressed_num,
         "headings_unnumbered": unnumbered,
         "headings_outline_only": outline_only,
         "numbering_mode": mode,

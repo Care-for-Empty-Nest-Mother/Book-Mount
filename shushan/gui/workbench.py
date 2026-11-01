@@ -15,18 +15,21 @@ Word"开始"式功能区（字体/段落/样式/通用，按钮外观与快捷�
 """
 import copy
 import html as _html
+import os
 import shutil
+import tempfile
 from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import (QColor, QFont, QIcon, QKeySequence, QShortcut,
-                           QTextCharFormat, QTextCursor)
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QColor, QFont, QIcon, QKeySequence, QPixmap,
+                           QShortcut, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog,
                                QDoubleSpinBox, QFileDialog, QFrame, QGroupBox,
                                QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QPushButton, QSplitter,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QScrollArea,
+                               QSplitter, QStackedWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ..analyzer.docx_analyzer import AnalysisResult, analyze_document
 from ..convert import ensure_docx
@@ -177,6 +180,14 @@ class ShushanWorkbench(QMainWindow):
         self._base_suggestion: dict = {}
         self._base_reasons: dict = {}
         self._touched_numbered: set = set()
+        # 页面视图（Word 真渲染）
+        self._page_mode = False
+        self._page_tmp: str | None = None
+        self._page_images: list = []
+        self._page_zoom = 1.0
+        self._pages_dirty = False
+        self._render_thread = None
+        self._render_busy = False
 
         self._build_ui()
         self._bind_shortcuts()
@@ -203,8 +214,11 @@ class ShushanWorkbench(QMainWindow):
                                     self._on_alt_click, self._context_menu,
                                     self._on_double)
         self.view.setFont(QFont("Microsoft YaHei", 10))
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.view)              # index 0 连续流预览
+        self.view_stack.addWidget(self._build_page_canvas())  # index 1 页面视图
         split.addWidget(self.card_view)
-        split.addWidget(self.view)
+        split.addWidget(self.view_stack)
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
         root.addWidget(split, stretch=1)
@@ -268,6 +282,19 @@ class ShushanWorkbench(QMainWindow):
         self.btn_pick_doc.setStyleSheet("font-weight:600; background:#d0ebff;")
         self.btn_pick_doc.clicked.connect(self._pick_and_load_document)
         lay.addWidget(self.btn_pick_doc)
+        self.btn_page_view = QPushButton("页面视图")
+        self.btn_page_view.setCheckable(True)
+        self.btn_page_view.setToolTip("右侧切换为 Word 真渲染的逐页预览（需本机 Word，"
+                                      "渲染约几秒）——分页/页眉页脚/页码/目录 100% 真实；\n"
+                                      "再点一次返回连续流预览")
+        self.btn_page_view.setEnabled(False)
+        self.btn_page_view.clicked.connect(self._toggle_page_view)
+        lay.addWidget(self.btn_page_view)
+        self.btn_refresh_pages = QPushButton("刷新页面视图")
+        self.btn_refresh_pages.setToolTip("按当前调整重新渲染页面视图（手动刷新）")
+        self.btn_refresh_pages.setEnabled(False)
+        self.btn_refresh_pages.clicked.connect(self._refresh_page_view)
+        lay.addWidget(self.btn_refresh_pages)
         self.btn_cleanup_word = QPushButton("清理Word后台")
         self.btn_cleanup_word.setToolTip(
             "结束后台残留的 Word 进程（自动化残留）；\n"
@@ -697,6 +724,12 @@ class ShushanWorkbench(QMainWindow):
         self._ribbon_set_enabled(True)
         for w in (self.region_combo, self.btn_region_mark, self.btn_region_clear):
             w.setEnabled(True)
+        self.btn_page_view.setEnabled(True)
+        self._page_images = []
+        self._pages_dirty = True
+        self._populate_pages()
+        if self._page_mode:
+            QTimer.singleShot(0, self._refresh_page_view)
         self._rebuild_cards()
         self._rebuild_preview()
         self._refresh_highlights()
@@ -712,6 +745,13 @@ class ShushanWorkbench(QMainWindow):
         self._ribbon_set_enabled(False)
         for w in (self.region_combo, self.btn_region_mark, self.btn_region_clear):
             w.setEnabled(False)
+        self.btn_page_view.setEnabled(False)
+        self.btn_refresh_pages.setEnabled(False)
+        if self._page_mode:
+            self.btn_page_view.setChecked(False)
+            self._page_mode = False
+        self._page_images = []
+        self.view_stack.setCurrentIndex(0)
         self.sel_label.setText("未加载文档")
         self.view.setHtml(EMPTY_GUIDE.replace("its", "它的"))
         self._p2b, self._b2p = {}, {}
@@ -1250,6 +1290,143 @@ class ShushanWorkbench(QMainWindow):
         self.log_line("[区域] 已清除选中范围的区域标记（建议还原到分析基线）")
         self._refresh_after_edit(cards=True)
 
+    # ================= 页面视图（Word 真渲染，M2.7） =================
+    def _build_page_canvas(self) -> QWidget:
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.page_banner = QLabel("")
+        self.page_banner.setWordWrap(True)
+        self.page_banner.setStyleSheet(
+            "background:#fff3bf; color:#8a6d1a; padding:3px 6px; font-size:11px;")
+        self.page_banner.hide()
+        v.addWidget(self.page_banner)
+        self.page_scroll = QScrollArea()
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setStyleSheet("background:#525659;")
+        self.page_container = QWidget()
+        self.page_container.setStyleSheet("background:#525659;")
+        self.page_lay = QVBoxLayout(self.page_container)
+        self.page_lay.setAlignment(Qt.AlignHCenter)
+        self.page_lay.setSpacing(8)
+        self.page_scroll.setWidget(self.page_container)
+        self.page_scroll.viewport().installEventFilter(self)
+        v.addWidget(self.page_scroll, stretch=1)
+        return wrap
+
+    def eventFilter(self, obj, ev):
+        if (obj is self.page_scroll.viewport() and ev.type() == QEvent.Wheel
+                and ev.modifiers() & Qt.ControlModifier):
+            factor = 1.1 if ev.angleDelta().y() > 0 else 1 / 1.1
+            self._page_zoom = max(0.4, min(3.0, self._page_zoom * factor))
+            self._populate_pages()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _populate_pages(self):
+        """按当前缩放把基准页图填充到画布。"""
+        while self.page_lay.count():
+            item = self.page_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for png in self._page_images:
+            pix = QPixmap()
+            pix.loadFromData(png)
+            if self._page_zoom != 1.0:
+                pix = pix.scaled(int(pix.width() * self._page_zoom),
+                                 int(pix.height() * self._page_zoom),
+                                 Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            lab = QLabel()
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setPixmap(pix)
+            self.page_lay.addWidget(lab)
+        self.page_lay.addStretch(1)
+
+    def _toggle_page_view(self):
+        self._page_mode = self.btn_page_view.isChecked()
+        if self._page_mode:
+            if self.analysis is None:
+                self.btn_page_view.setChecked(False)
+                self._page_mode = False
+                return
+            self.view_stack.setCurrentIndex(1)
+            self.btn_refresh_pages.setEnabled(not self._render_busy)
+            if not self._page_images or self._pages_dirty:
+                self._refresh_page_view()
+        else:
+            self.view_stack.setCurrentIndex(0)
+            self.btn_refresh_pages.setEnabled(False)
+
+    def _current_effective_profile(self) -> dict:
+        """当前四态合并后的方案（style_edits + 缺失类型补空样式）。"""
+        profile = copy.deepcopy(self.profile or {})
+        if self.style_edits:
+            profile.setdefault("styles", {}).update(copy.deepcopy(self.style_edits))
+        styles = profile.setdefault("styles", {})
+        for tid in set(self.assignment.values()):
+            if tid and tid != IGNORE_TYPE and tid not in styles:
+                styles[tid] = {}
+        return profile
+
+    def _refresh_page_view(self):
+        if self.analysis is None or self._render_thread is not None:
+            return
+        if not self._require_profile():
+            return
+        if self._page_tmp is None:
+            self._page_tmp = tempfile.mkdtemp(prefix="shushan_pages_")
+        self._pages_dirty = False
+        self._update_page_banner()
+        self._set_page_busy(True)
+        self._render_thread = _PageRenderWorker(
+            self.work_path, self._page_tmp, self._current_effective_profile(),
+            dict(self.assignment), dict(self.numbered), dict(self.fmt_overrides))
+        self._render_thread.done_sig.connect(self._on_pages_ready)
+        self._render_thread.error_sig.connect(self._on_pages_error)
+        self._render_thread.start()
+
+    def _on_pages_ready(self, pngs, elapsed):
+        self._page_images = pngs
+        self._populate_pages()
+        self._set_page_busy(False)
+        self._render_thread = None
+        self._update_page_banner()
+        self.log_line(f"[页面视图] 渲染完成：{len(pngs)} 页，耗时 {elapsed:.1f} 秒"
+                      f"（Ctrl+滚轮缩放）")
+
+    def _on_pages_error(self, msg):
+        self._set_page_busy(False)
+        self._render_thread = None
+        self._pages_dirty = True
+        self._update_page_banner()
+        self.log_line(f"⚠ [页面视图] {msg}")
+
+    def _set_page_busy(self, busy, text="渲染中…（Word 导出 PDF，约几秒）"):
+        self._render_busy = busy
+        self.btn_refresh_pages.setEnabled(not busy and self._page_mode)
+        self.btn_page_view.setEnabled(not busy and self.analysis is not None)
+        self.page_banner.setText(text if busy else "")
+        self.page_banner.setVisible(busy)
+        if busy:
+            self.view_stack.setCurrentIndex(1)
+
+    def _update_page_banner(self):
+        if self._render_busy:
+            return
+        if self._page_mode and self._pages_dirty and self.analysis is not None:
+            self.page_banner.setText("预览已过期（有新的调整）——点「刷新页面视图」更新")
+            self.page_banner.setVisible(True)
+        elif not self._render_busy:
+            self.page_banner.setVisible(False)
+
+    def closeEvent(self, ev):
+        if self._page_tmp:
+            shutil.rmtree(self._page_tmp, ignore_errors=True)
+            self._page_tmp = None
+        super().closeEvent(ev)
+
     def _on_reset(self):
         if self.analysis is None:
             return
@@ -1269,6 +1446,8 @@ class ShushanWorkbench(QMainWindow):
         self._sync_selection_label()
         self._update_citation_label()
         self._sync_ribbon()
+        self._pages_dirty = True
+        self._update_page_banner()
 
     # ================= 整稿（窗口内，不关窗） =================
     def _apply_now(self, numbering_override="__dialog__"):
@@ -1280,16 +1459,8 @@ class ShushanWorkbench(QMainWindow):
         if self.analysis is None or self.work_path is None:
             QMessageBox.information(self, APP_TITLE, "请先「整稿应用…」选择目标文档。")
             return
-        profile = copy.deepcopy(self.profile or {})
-        if self.style_edits:
-            profile.setdefault("styles", {}).update(copy.deepcopy(self.style_edits))
+        profile = self._current_effective_profile()
         assignment = dict(self.assignment)
-        # 区域规则可能建议出方案未定义的类型——补空样式定义（Word 默认），
-        # 避免"样式不存在"告警且段落原样保留
-        styles = profile.setdefault("styles", {})
-        for tid in set(assignment.values()):
-            if tid and tid != IGNORE_TYPE and tid not in styles:
-                styles[tid] = {}
         if numbering_override == "__dialog__":
             override = self._ask_numbering_mode(assignment)
             if override is None:
@@ -1334,6 +1505,9 @@ class ShushanWorkbench(QMainWindow):
             self.log_line(f"        备份：{report['backup']}")
         if report.get("manual_numbering_kept"):
             self.log_line("        检测到手工编号，已保留文字编号、未启用自动编号")
+        if report.get("numbering_suppressed"):
+            self.log_line(f"        封面段落编号压制：{report['numbering_suppressed']} 段"
+                          f"（封面不参与编号）")
         if report.get("protected_objects"):
             self.log_line(f"        图形/公式段防裁剪保护：{report['protected_objects']} 段")
         if report.get("headings_outline_only"):
@@ -1456,3 +1630,38 @@ class _LogView(QPlainTextEdit):
 
 # 兼容别名：旧调用仍可用 WorkbenchDialog 名字拿到主窗口类
 WorkbenchDialog = ShushanWorkbench
+
+
+class _PageRenderWorker(QThread):
+    """后台渲染线程：四态落地临时副本 → Word 导出 PDF → 逐页 PNG。"""
+
+    done_sig = Signal(list, float)          # (png 字节列表, 耗时秒)
+    error_sig = Signal(str)
+
+    def __init__(self, src_docx: str, workdir: str, profile: dict,
+                 assignment: dict, numbered: dict, fmt_overrides: dict):
+        super().__init__()
+        self._src = src_docx
+        self._workdir = workdir
+        self._profile = profile
+        self._assignment = assignment
+        self._numbered = numbered
+        self._fmt_overrides = fmt_overrides
+
+    def run(self):
+        import time
+        t0 = time.time()
+        try:
+            dst = os.path.join(self._workdir, "预览.docx")
+            shutil.copy2(self._src, dst)
+            from ..render import apply_profile_offline
+            apply_profile_offline(self._profile, dst,
+                                  para_override=dict(self._assignment),
+                                  numbered_map=dict(self._numbered),
+                                  fmt_overrides=dict(self._fmt_overrides),
+                                  make_backup=False)
+            from ..render.word_pdf import render_pages_from_docx
+            pngs = render_pages_from_docx(dst, dpi=110, workdir=self._workdir)
+            self.done_sig.emit(pngs, time.time() - t0)
+        except Exception as e:
+            self.error_sig.emit(str(e))
