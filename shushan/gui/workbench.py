@@ -458,6 +458,7 @@ class ShushanWorkbench(QMainWindow):
         self.profile_combo = QComboBox()
         self.profile_combo.setMinimumWidth(200)
         self.profile_combo.setToolTip("格式方案库（profiles/）")
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_combo)
         lay.addWidget(self.profile_combo, stretch=1)
         for text, tip, slot in (
                 ("提取格式", "从一篇排版规范的文献提取格式方案（弹批注视图）",
